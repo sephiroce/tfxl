@@ -1,4 +1,4 @@
-
+#-*- coding:utf-8 -*-
 # Copyright 2019 The Transformer-xl Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,7 +35,6 @@ from tensorflow.io.gfile import exists
 from tensorflow.io.gfile import makedirs
 from tensorflow.io.gfile import glob
 
-
 def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len, num_shuffle):
   file_names = []
   num_batch = 0
@@ -57,10 +56,10 @@ def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len, num_shuffle):
 
 
 class Corpus(object):
-  def __init__(self, path, dataset, *args, **kwargs):
-    self.dataset = dataset
+  def __init__(self, path, *args, **kwargs):
     self.vocab = Vocab(*args, **kwargs)
 
+    """
     if self.dataset in ["ptb", "wt2", "enwik8", "text8"]:
       self.vocab.count_file(os.path.join(path, "train.txt"))
       self.vocab.count_file(os.path.join(path, "valid.txt"))
@@ -77,38 +76,26 @@ class Corpus(object):
       # for train_path in sorted(train_paths):
       #   self.vocab.count_file(train_path, verbose=True)
 
+    """
     self.vocab.build_vocab()
+    pattern = os.path.join(path,"train", "train.??")
+    self.train = glob(pattern)
+    print(self.train)
+    self.valid = self.vocab.encode_file(
+        os.path.join(path, "valid.txt"), ordered=True, add_eos=True)
+    self.test  = self.vocab.encode_file(
+        os.path.join(path, "test.txt"), ordered=True, add_eos=True)
 
-    if self.dataset in ["ptb", "wt2", "wt103"]:
-      self.train = self.vocab.encode_file(
-          os.path.join(path, "train.txt"), ordered=True)
-      self.valid = self.vocab.encode_file(
-          os.path.join(path, "valid.txt"), ordered=True)
-      self.test  = self.vocab.encode_file(
-          os.path.join(path, "test.txt"), ordered=True)
-    elif self.dataset in ["enwik8", "text8"]:
-      self.train = self.vocab.encode_file(
-          os.path.join(path, "train.txt"), ordered=True, add_eos=False)
-      self.valid = self.vocab.encode_file(
-          os.path.join(path, "valid.txt"), ordered=True, add_eos=False)
-      self.test  = self.vocab.encode_file(
-          os.path.join(path, "test.txt"), ordered=True, add_eos=False)
-    elif self.dataset == "lm1b":
-      self.train = train_paths
-      valid_path = os.path.join(path, "valid.txt")
-      test_path = valid_path
-      self.valid = self.vocab.encode_file(
-          valid_path, ordered=True, add_double_eos=True)
-      self.test  = self.vocab.encode_file(
-          test_path, ordered=True, add_double_eos=True)
-
+    #self.cutoffs = None
+    """
     if self.dataset == "wt103":
       self.cutoffs = [0, 20000, 40000, 200000] + [len(self.vocab)]
     elif self.dataset == "lm1b":
-      self.cutoffs = [0, 60000, 100000, 640000] + [len(self.vocab)]
+      
     else:
-      self.cutoffs = []
-
+    """
+    #self.cutoffs = [0, 60000, 100000, 640000] + [len(self.vocab)]
+    self.cutoffs = []
 
   def convert_to_tfrecords(self, split, save_dir, bsz, tgt_len,
                            num_core_per_host, **kwargs):
@@ -119,53 +106,54 @@ class Corpus(object):
          split, bsz, tgt_len)
 
     record_info_path = os.path.join(save_dir, record_name)
+    """
+    data = getattr(self, split)
+    bin_sizes = get_bin_sizes(
+        data, bsz // num_core_per_host, tgt_len, self.cutoffs)
+    file_name, num_batch = create_ordered_tfrecords(
+        save_dir, split, data, bsz, tgt_len)
+    file_names.append(file_name)
 
-    if self.dataset in ["ptb", "wt2", "wt103", "enwik8", "text8"]:
-      data = getattr(self, split)
-      bin_sizes = get_bin_sizes(
-          data, bsz // num_core_per_host, tgt_len, self.cutoffs)
-      file_name, num_batch = create_ordered_tfrecords(
-          save_dir, split, data, bsz, tgt_len)
-      file_names.append(file_name)
-    elif self.dataset == "lm1b":
-      bin_sizes = get_bin_sizes(
-          self.valid, bsz // num_core_per_host, tgt_len, self.cutoffs)
-      if split == "train":
-        np.random.seed(123456)
-        num_batch = 0
+    """
+    bin_sizes = get_bin_sizes(
+        self.valid, bsz // num_core_per_host, tgt_len, self.cutoffs)
+    if split == "train":
+      np.random.seed(123456)
+      num_batch = 0
 
-        if FLAGS.num_procs > 1:
-          _preprocess_wrapper = partial(_preprocess,
-              train=self.train, vocab=self.vocab, save_dir=save_dir,
-              cutoffs=self.cutoffs, bin_sizes=bin_sizes, bsz=bsz,
-              tgt_len=tgt_len, num_core_per_host=num_core_per_host,
-              num_shuffle=FLAGS.num_shuffle)
+      if FLAGS.num_procs > 1:
+        _preprocess_wrapper = partial(_preprocess,
+            train=self.train, vocab=self.vocab, save_dir=save_dir,
+            cutoffs=self.cutoffs, bin_sizes=bin_sizes, bsz=bsz,
+            tgt_len=tgt_len, num_core_per_host=num_core_per_host,
+            num_shuffle=FLAGS.num_shuffle)
 
-          pool = mp.Pool(processes=FLAGS.num_procs)
-          results = pool.map(_preprocess_wrapper, range(len(self.train)))
-          for res in results:
-            file_names.extend(res[0])
-            num_batch += res[1]
-        else:
-          for shard, path in enumerate(self.train):
-            data_shard = self.vocab.encode_file(path, ordered=False,
-                                                add_double_eos=True)
-
-            num_shuffle = FLAGS.num_shuffle
-
-            for shuffle in range(num_shuffle):
-              print("Processing shard {} shuffle {}".format(shard, shuffle))
-              basename = "train-{:03d}-{:02d}".format(shard, shuffle)
-              np.random.shuffle(data_shard)
-              file_name, num_batch_ = create_ordered_tfrecords(
-                  save_dir, basename, np.concatenate(data_shard), bsz, tgt_len)
-              file_names.append(file_name)
-              num_batch += num_batch_
-
+        pool = mp.Pool(processes=FLAGS.num_procs)
+        results = pool.map(_preprocess_wrapper, range(len(self.train)))
+        for res in results:
+          file_names.extend(res[0])
+          num_batch += res[1]
       else:
-        file_name, num_batch = create_ordered_tfrecords(
-            save_dir, split, getattr(self, split), bsz, tgt_len)
-        file_names.append(file_name)
+        for shard, path in enumerate(self.train):
+          data_shard = self.vocab.encode_file(path, ordered=False,
+                                              add_double_eos=True)
+
+          num_shuffle = FLAGS.num_shuffle
+
+          for shuffle in range(num_shuffle):
+            print("Processing shard {} shuffle {}".format(shard, shuffle))
+            basename = "train-{:03d}-{:02d}".format(shard, shuffle)
+            np.random.shuffle(data_shard)
+            file_name, num_batch_ = create_ordered_tfrecords(
+                save_dir, basename, np.concatenate(data_shard), bsz, tgt_len)
+            file_names.append(file_name)
+            num_batch += num_batch_
+
+    else:
+      file_name, num_batch = create_ordered_tfrecords(
+          save_dir, split, getattr(self, split), bsz, tgt_len)
+      file_names.append(file_name)
+
 
     with open(record_info_path, "w") as fp:
       record_info = {
@@ -174,7 +162,6 @@ class Corpus(object):
         "num_batch": num_batch
       }
       json.dump(record_info, fp)
-
 
 def get_bin_sizes(data, batch_size, tgt_len, cutoffs, std_mult=[2.5, 2.5, 2.5]):
   """
@@ -205,7 +192,6 @@ def get_bin_sizes(data, batch_size, tgt_len, cutoffs, std_mult=[2.5, 2.5, 2.5]):
 
   return bin_sizes
 
-
 def _int64_feature(values):
   return tf.train.Feature(int64_list=tf.train.Int64List(value=values))
 
@@ -228,7 +214,6 @@ def batchify(data, batch_size):
   data = data.reshape(batch_size, num_step)
 
   return data
-
 
 def create_ordered_tfrecords(save_dir, basename, data, batch_size, tgt_len):
 
@@ -266,8 +251,7 @@ def create_ordered_tfrecords(save_dir, basename, data, batch_size, tgt_len):
 
   return file_name, num_batch
 
-
-def get_lm_corpus(data_dir, dataset):
+def get_lm_corpus(data_dir):
   fn = os.path.join(data_dir, "cache.pkl")
 
   if exists(fn):
@@ -277,20 +261,10 @@ def get_lm_corpus(data_dir, dataset):
   else:
     print("Producing dataset...")
     kwargs = {}
-    if dataset in ["wt103", "wt2"]:
-      kwargs["special"] = ["<eos>"]
-      kwargs["lower_case"] = False
-    elif dataset == "ptb":
-      kwargs["special"] = ["<eos>"]
-      kwargs["lower_case"] = True
-    elif dataset == "lm1b":
-      kwargs["special"] = []
-      kwargs["lower_case"] = False
-      kwargs["vocab_file"] = os.path.join(data_dir, "1b_word_vocab.txt")
-    elif dataset in ["enwik8", "text8"]:
-      pass
+    kwargs["lower_case"] = True
+    kwargs["vocab_file"] = os.path.join(data_dir, FLAGS.vocab)
 
-    corpus = Corpus(data_dir, dataset, **kwargs)
+    corpus = Corpus(data_dir, **kwargs)
 
     print("Saving dataset...")
     with open(fn, "wb") as fp:
@@ -299,17 +273,15 @@ def get_lm_corpus(data_dir, dataset):
     corpus_info = {
       "vocab_size" : len(corpus.vocab),
       "cutoffs" : corpus.cutoffs,
-      "dataset" : corpus.dataset
     }
     with open(os.path.join(data_dir, "corpus-info.json"), "w") as fp:
       json.dump(corpus_info, fp)
 
   return corpus
 
-
 def main(unused_argv):
   del unused_argv  # Unused
-  corpus = get_lm_corpus(FLAGS.data_dir, FLAGS.dataset)
+  corpus = get_lm_corpus(FLAGS.data_dir)
 
   save_dir = os.path.join(FLAGS.data_dir, "tfrecords")
   if not exists(save_dir):
@@ -330,7 +302,6 @@ def main(unused_argv):
     print("Converting {} set...".format(split))
     corpus.convert_to_tfrecords(split, save_dir, batch_size, FLAGS.tgt_len,
                                 FLAGS.num_core_per_host, FLAGS=FLAGS)
-
 
 def load_record_info(record_info_dir, split, per_host_bsz, tgt_len):
   record_name = "record_info-{}.bsz-{}.tlen-{}.json".format(split, per_host_bsz, tgt_len)
@@ -451,9 +422,6 @@ if __name__ == "__main__":
   FLAGS = flags.FLAGS
   flags.DEFINE_string("data_dir", None,
         help="Location of the data corpus")
-  flags.DEFINE_enum("dataset", "wt103",
-        ["ptb", "wt2", "wt103", "lm1b", "enwik8", "text8"],
-        help="Dataset name.")
   flags.DEFINE_integer("per_host_train_bsz", 60,
         help="train batch size each host")
   flags.DEFINE_integer("per_host_valid_bsz", 60,
@@ -473,5 +441,7 @@ if __name__ == "__main__":
         help="number of processes")
   flags.DEFINE_integer("num_shuffle", 4,
         help="number of shuffles for lm1b")
+  flags.DEFINE_string("vocab", None,
+                      help="vocab filename")
 
   tf.compat.v1.app.run(main)

@@ -1,3 +1,4 @@
+#-*- coding:utf-8 -*-
 # Copyright 2019 The Transformer-xl Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,15 +24,16 @@ from tensorflow.io.gfile import GFile as open
 from tensorflow.io.gfile import exists as exists
 
 class Vocab(object):
-  def __init__(self, special=[], min_freq=0, max_size=None, lower_case=True,
+  def __init__(self, min_freq=0, max_size=None, lower_case=True,
          delimiter=None, vocab_file=None):
     self.counter = Counter()
-    self.special = special
     self.min_freq = min_freq
     self.max_size = max_size
     self.lower_case = lower_case
     self.delimiter = delimiter
     self.vocab_file = vocab_file
+    self.idx2sym = None
+    self.sym2idx = None
 
   def tokenize(self, line, add_eos=False, add_double_eos=False):
     line = line.strip()
@@ -46,9 +48,9 @@ class Vocab(object):
       symbols = line.split(self.delimiter)
 
     if add_double_eos: # lm1b
-      return ['<S>'] + symbols + ['<S>']
+      return ['<s>'] + symbols + ['</s>']
     elif add_eos:
-      return symbols + ['<eos>']
+      return symbols + ['</s>']
     else:
       return symbols
 
@@ -85,7 +87,7 @@ class Vocab(object):
       for line in f:
         symb = line.strip().split()[0]
         self.add_symbol(symb)
-    self.unk_idx = self.sym2idx['<UNK>']
+    self.unk_idx = self.sym2idx['<unk>']
 
   def build_vocab(self):
     if self.vocab_file:
@@ -97,9 +99,6 @@ class Vocab(object):
         self.min_freq, self.max_size))
       self.idx2sym = []
       self.sym2idx = OrderedDict()
-
-      for sym in self.special:
-        self.add_special(sym)
 
       for sym, cnt in self.counter.most_common(self.max_size):
         if cnt < self.min_freq: break
