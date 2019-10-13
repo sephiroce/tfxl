@@ -1,4 +1,5 @@
 # coding=utf-8
+# pylint: disable=import-error, too-many-locals, too-many-branches
 # Copyright 2018 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -74,8 +75,8 @@ def main(_):
 
   # Read variables from all checkpoints and average them.
   tf.logging.info("Reading variables and averaging checkpoints:")
-  for c in checkpoints:
-    tf.logging.info("%s ", c)
+  for ckpt_idx in checkpoints:
+    tf.logging.info("%s ", ckpt_idx)
   var_list = tf.contrib.framework.list_variables(checkpoints[0])
   var_values, var_dtypes = {}, {}
   for (name, shape) in var_list:
@@ -105,9 +106,9 @@ def main(_):
   # Build a model consisting only of variables, set them to the average values.
   with tf.Session() as sess:
     sess.run(tf.initialize_all_variables())
-    for p, assign_op, (name, value) in zip(placeholders, assign_ops,
-                                           six.iteritems(var_values)):
-      sess.run(assign_op, {p: value})
+    for plhd_idx, assign_op, (name, value) in zip(placeholders, assign_ops,
+                                                  six.iteritems(var_values)):
+      sess.run(assign_op, {plhd_idx: value})
     # Use the built saver to save the averaged checkpoint.
     saver.save(sess, FLAGS.output_path, global_step=global_step)
 

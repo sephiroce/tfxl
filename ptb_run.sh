@@ -1,7 +1,7 @@
 #!/bin/bash
-PYTHONPATH=`pwd`
-echo $PYTHONPATH
+export PYTHONPATH=`pwd`
 NAME=ptb
+
 # Data
 DATA_ROOT=./data/${NAME}/
 
@@ -29,6 +29,7 @@ TEST_BSZ=8
 if [[ $1 == 'train_data' ]]; then
     python tfxl/data_utils.py \
         --data_dir=${DATA_ROOT}/ \
+        --vocab=${NAME}.vocab \
         --dataset=${NAME} \
         --tgt_len=${TGT_LEN} \
         --per_host_train_bsz=${BSZ} \
@@ -37,6 +38,7 @@ if [[ $1 == 'train_data' ]]; then
 elif [[ $1 == 'test_data' ]]; then
     python tfxl/data_utils.py \
         --data_dir=${DATA_ROOT}/ \
+        --vocab=${NAME}.vocab \
         --dataset=${NAME} \
         --tgt_len=${TEST_TGT_LEN} \
         --per_host_test_bsz=${TEST_BSZ} \
@@ -45,6 +47,7 @@ elif [[ $1 == 'train' ]]; then
     echo 'Run training...'
     python tfxl/train_gpu.py \
         --data_dir=${DATA_ROOT}/tfrecords \
+        --vocab=${NAME}.vocab \
         --record_info_dir=${DATA_ROOT}/tfrecords/ \
         --corpus_info_path=${DATA_ROOT}/corpus-info.json \
         --model_dir=EXP-${NAME} \
@@ -71,6 +74,7 @@ elif [[ $1 == 'eval' ]]; then
     echo 'Run evaluation...'
     python tfxl/train_gpu.py \
         --data_dir=${DATA_ROOT}/tfrecords \
+        --vocab=${NAME}.vocab \
         --record_info_dir=${DATA_ROOT}/tfrecords/ \
         --corpus_info_path=${DATA_ROOT}/corpus-info.json \
         --model_dir=EXP-${NAME} \

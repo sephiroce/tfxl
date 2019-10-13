@@ -1,4 +1,7 @@
 #-*- coding:utf-8 -*-
+# pylint: disable=import-error, too-many-instance-attributes
+# pylint: disable=too-many-arguments
+
 # Copyright 2019 The Transformer-xl Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,15 +20,14 @@ from __future__ import division
 from __future__ import print_function
 
 from collections import Counter, OrderedDict
-
 import numpy as np
 
-from tensorflow.io.gfile import GFile as open
+from tensorflow.io.gfile import GFile as gfile_open
 from tensorflow.io.gfile import exists as exists
 
 class Vocab(object):
   def __init__(self, min_freq=0, max_size=None, lower_case=True,
-         delimiter=None, vocab_file=None):
+               delimiter=None, vocab_file=None):
     self.counter = Counter()
     self.min_freq = min_freq
     self.max_size = max_size
@@ -34,6 +36,7 @@ class Vocab(object):
     self.vocab_file = vocab_file
     self.idx2sym = None
     self.sym2idx = None
+    self.unk_idx = -1
 
   def tokenize(self, line, add_eos=False, add_double_eos=False):
     line = line.strip()
@@ -51,73 +54,39 @@ class Vocab(object):
       return ['<s>'] + symbols + ['</s>']
     elif add_eos:
       return symbols + ['</s>']
-    else:
-      return symbols
+    return symbols
 
-  def count_file(self, path, verbose=False, add_eos=False):
-    if verbose: print('counting file {} ...'.format(path))
-    assert exists(path)
-
-    sents = []
-    with open(path, 'r') as f:
-      for idx, line in enumerate(f):
-        if verbose and idx > 0 and idx % 500000 == 0:
-          print('  line {}'.format(idx))
-        symbols = self.tokenize(line, add_eos=add_eos)
-        self.counter.update(symbols)
-        sents.append(symbols)
-
-    return sents
-
-  def count_sents(self, sents, verbose=False):
-    """
-      sents : a list of sentences, each a list of tokenized symbols
-    """
-    if verbose: print('counting {} sents ...'.format(len(sents)))
-    for idx, symbols in enumerate(sents):
-      if verbose and idx > 0 and idx % 500000 == 0:
-        print('  line {}'.format(idx))
-      self.counter.update(symbols)
-
-  def _build_from_file(self, vocab_file):
+  def _build_from_file(self, vocab_file_path):
     self.idx2sym = []
     self.sym2idx = OrderedDict()
 
-    with open(vocab_file, 'r') as f:
-      for line in f:
+    with gfile_open(vocab_file_path, 'r') as vocab_file:
+      for line in vocab_file:
         symb = line.strip().split()[0]
         self.add_symbol(symb)
     self.unk_idx = self.sym2idx['<unk>']
 
   def build_vocab(self):
-    if self.vocab_file:
-      print('building vocab from {}'.format(self.vocab_file))
-      self._build_from_file(self.vocab_file)
-      print('final vocab size {}'.format(len(self)))
-    else:
-      print('building vocab with min_freq={}, max_size={}'.format(
-        self.min_freq, self.max_size))
-      self.idx2sym = []
-      self.sym2idx = OrderedDict()
-
-      for sym, cnt in self.counter.most_common(self.max_size):
-        if cnt < self.min_freq: break
-        self.add_symbol(sym)
-
-      print('final vocab size {} from {} unique tokens'.format(
-        len(self), len(self.counter)))
+    if not self.vocab_file:
+      print('Vocab was not set.')
+      import sys
+      sys.exit(1)
+    print('building vocab from {}'.format(self.vocab_file))
+    self._build_from_file(self.vocab_file)
+    print('final vocab size {}'.format(len(self)))
 
   def encode_file(self, path, ordered=False, verbose=False, add_eos=True,
-          add_double_eos=False):
-    if verbose: print('encoding file {} ...'.format(path))
+                  add_double_eos=False):
+    if verbose:
+      print('encoding file {} ...'.format(path))
     assert exists(path)
     encoded = []
-    with open(path, 'r') as f:
-      for idx, line in enumerate(f):
+    with gfile_open(path, 'r') as file_to_encode:
+      for idx, line in enumerate(file_to_encode):
         if verbose and idx > 0 and idx % 500000 == 0:
           print('  line {}'.format(idx))
         symbols = self.tokenize(line, add_eos=add_eos,
-          add_double_eos=add_double_eos)
+                                add_double_eos=add_double_eos)
         encoded.append(self.convert_to_nparray(symbols))
 
     if ordered:
@@ -126,7 +95,8 @@ class Vocab(object):
     return encoded
 
   def encode_sents(self, sents, ordered=False, verbose=False):
-    if verbose: print('encoding {} sents ...'.format(len(sents)))
+    if verbose:
+      print('encoding {} sents ...'.format(len(sents)))
     encoded = []
     for idx, symbols in enumerate(sents):
       if verbose and idx > 0 and idx % 500000 == 0:
@@ -156,9 +126,8 @@ class Vocab(object):
   def get_idx(self, sym):
     if sym in self.sym2idx:
       return self.sym2idx[sym]
-    else:
-      assert hasattr(self, 'unk_idx')
-      return self.sym2idx.get(sym, self.unk_idx)
+    assert hasattr(self, 'unk_idx')
+    return self.sym2idx.get(sym, self.unk_idx)
 
   def get_symbols(self, indices):
     return [self.get_sym(idx) for idx in indices]
@@ -173,8 +142,7 @@ class Vocab(object):
   def convert_to_sent(self, indices, exclude=None):
     if exclude is None:
       return ' '.join([self.get_sym(idx) for idx in indices])
-    else:
-      return ' '.join([self.get_sym(idx) for idx in indices if idx not in exclude])
+    return ' '.join([self.get_sym(idx) for idx in indices if idx not in exclude])
 
   def __len__(self):
     return len(self.idx2sym)
