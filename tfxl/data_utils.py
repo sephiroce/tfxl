@@ -58,7 +58,7 @@ def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len, num_shuffle):
   return file_names, num_batch
 
 
-class Corpus():
+class Corpus:
   def __init__(self, path, add_eos, add_beos, *args, **kwargs):
     self.vocab = Vocab(*args, **kwargs)
     self.add_eos = add_eos
@@ -76,8 +76,15 @@ class Corpus():
                              ordered=True, add_eos=self.add_eos,
                              add_beos=self.add_beos)
 
-    # Example self.cutoffs = [0, 60000, 100000, 640000] + [len(self.vocab)]
-    self.cutoffs = []
+    if FLAGS.cutoffs.split(", "):
+      self.cutoffs = [0] + [int(cutoff) for cutoff in
+                            FLAGS.cutoffs.split(", ")] + [len(self.vocab)]
+    else:
+      self.cutoffs = []
+
+    print("cutoffs:")
+    print(self.cutoffs)
+
 
   def convert_to_tfrecords(self, split, save_dir, bsz, tgt_len,
                            num_core_per_host, **kwargs):
@@ -95,10 +102,11 @@ class Corpus():
       num_batch = 0
 
       if config_flags.num_procs > 1:
+        #def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len,num_shuffle):
         _preprocess_wrapper = \
           partial(_preprocess, train=self.train, vocab=self.vocab,
-                  save_dir=save_dir, cutoffs=self.cutoffs,
-                  bin_sizes=bin_sizes, bsz=bsz, gt_len=tgt_len,
+                  save_dir=save_dir,
+                  bin_sizes=bin_sizes, bsz=bsz, tgt_len=tgt_len,
                   num_core_per_host=num_core_per_host,
                   num_shuffle=config_flags.num_shuffle)
 
@@ -185,9 +193,7 @@ def batchify(data, batch_size):
   return data
 
 def create_ordered_tfrecords(save_dir, basename, data, batch_size, tgt_len):
-
   file_name = "{}.bsz-{}.tlen-{}.tfrecords".format(basename, batch_size, tgt_len)
-
   save_path = os.path.join(save_dir, file_name)
   record_writer = tf.io.TFRecordWriter(save_path)
 
@@ -249,6 +255,7 @@ def get_lm_corpus(data_dir):
 
   return corpus
 
+
 def main(unused_argv):
   del unused_argv  # Unused
   corpus = get_lm_corpus(FLAGS.data_dir)
@@ -275,23 +282,20 @@ def main(unused_argv):
     corpus.convert_to_tfrecords(split, save_dir, batch_size, FLAGS.tgt_len,
                                 FLAGS.num_core_per_host, FLAGS=FLAGS)
 
-def load_record_info(record_info_dir, split, per_host_bsz, tgt_len):
-  record_name = "record_info-{}.bsz-{}.tlen-{}.json".format(split, per_host_bsz, tgt_len)
+
+def get_input_fn(record_info_dir, split, per_host_bsz, tgt_len,
+                 num_core_per_host):
+  """Creates input function."""
+  record_name = "record_info-{}.bsz-{}.tlen-{}.json".format(split, per_host_bsz,
+                                                            tgt_len)
 
   record_info_path = os.path.join(record_info_dir, record_name)
+  tf.compat.v1.logging.info("loading corpus_info from {}"
+                            .format(record_info_path))
   with open(record_info_path, "r") as fp:
     record_info = json.load(fp)
 
-  return record_info
-
-def get_input_fn(record_info_dir, split, per_host_bsz, tgt_len,
-                 num_core_per_host, num_hosts=1):
-  """Creates input function."""
-  record_info = load_record_info(record_info_dir, split, per_host_bsz, tgt_len)
-
   file_names = record_info["filenames"]
-  bin_sizes = record_info["bin_sizes"]
-  num_batch = record_info["num_batch"]
 
   tf.compat.v1.logging.info("[{}] File names {}".format(split, file_names))
 
@@ -303,25 +307,6 @@ def get_input_fn(record_info_dir, split, per_host_bsz, tgt_len,
     data_dir = params["data_dir"]
 
     def parser(record):
-      # preprocess "inp_perm" and "tgt_perm"
-      def _process_perm_feature(example, prefix): # pylint: disable=unused-variable
-        for bin_idx, _ in enumerate(bin_sizes):
-          cnt = example.pop("{}_cnt_{}".format(prefix, bin_idx))[0]
-          tup = example.pop("{}_tup_{}".format(prefix, bin_idx))
-
-          tup = tf.reshape(
-              tf.sparse_tensor_to_dense(tup),
-              shape=[cnt, 2])
-
-          # tf.float32
-          perm = tf.sparse_to_dense(
-              sparse_indices=tup,
-              output_shape=[tgt_len, bin_sizes[bin_idx]],
-              sparse_values=1.0,
-              default_value=0.0)
-
-          example["{}_perm_{}".format(prefix, bin_idx)] = perm
-
       # whether allow the last batch with a potentially shorter length
       record_spec = {
           "inputs": tf.io.VarLenFeature(tf.int64),
@@ -355,16 +340,6 @@ def get_input_fn(record_info_dir, split, per_host_bsz, tgt_len,
       if len(file_paths) > 1:
         dataset = dataset.shuffle(len(file_paths)).repeat()
         dataset = tf.data.TFRecordDataset(dataset)
-      elif num_hosts > 1:
-        host_id = params["context"].current_host
-        # drop the remaining batches
-        num_batch_per_host = num_batch // num_hosts
-
-        my_start_sample_id = (host_id * num_batch_per_host * num_core_per_host *
-                              per_core_bsz)
-        my_sample_num = num_batch_per_host * num_core_per_host * per_core_bsz
-        dataset = tf.data.TFRecordDataset(dataset).skip(
-            my_start_sample_id).take(my_sample_num)
       else:
         dataset = tf.data.TFRecordDataset(dataset)
 
@@ -380,18 +355,12 @@ def get_input_fn(record_info_dir, split, per_host_bsz, tgt_len,
 
     return dataset
 
-  if split == "train" and num_hosts > 1:
-    record_info["num_batch"] = num_batch // num_hosts
-
   return input_fn, record_info
-
-def get_corpus_info(corpus_info_path):
-  with open(corpus_info_path, "r") as fp:
-    corpus_info = json.load(fp)
-  return corpus_info
 
 if __name__ == "__main__":
   FLAGS = flags.FLAGS
+  flags.DEFINE_string("cutoffs", default=None,
+                    help="int, int, int ..")
   flags.DEFINE_bool("add_eos", default=False,
                     help="whether to add </s> symbol")
   flags.DEFINE_bool("add_beos", default=True,
@@ -408,9 +377,6 @@ if __name__ == "__main__":
   flags.DEFINE_integer("tgt_len", 70, help="number of tokens to predict")
   flags.DEFINE_integer("max_batch", -1, help="run in debug mode")
   flags.DEFINE_integer("num_core_per_host", 8, help="8 for TPU v2.")
-  flags.DEFINE_bool("debug", default=False,
-                    help="Process only the first batch without shuffle for"
-                         "the lm1b example.")
   flags.DEFINE_integer("num_procs", 1, help="number of processes")
   flags.DEFINE_integer("num_shuffle", 4, help="number of shuffles for lm1b")
   flags.DEFINE_string("vocab", None, help="vocab filename")

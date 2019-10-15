@@ -109,49 +109,71 @@ def rel_multihead_attn(arg_w, arg_r, r_w_bias, r_r_bias, attn_mask, mems, d_mode
   return output
 
 
-def embedding_lookup(lookup_table, arg_x):
-  return tf.nn.embedding_lookup(lookup_table, arg_x)
-
-
 def mask_adaptive_embedding_lookup(arg_x, n_token, d_embed, d_proj, cutoffs,
                                    initializer,
                                    proj_initializer,
                                    div_val=1,
                                    proj_same_dim=True,
                                    scope='adaptive_embed'):
-  emb_scale = d_proj ** 0.5
+  """
+  masking according to cutoffs
+
+  :param arg_x:
+  :param n_token:
+  :param d_embed:
+  :param d_proj:
+  :param cutoffs:
+  :param initializer:
+  :param proj_initializer:
+  :param div_val:
+  :param proj_same_dim:
+  :param scope:
+  :return:
+  """
   with tf.compat.v1.variable_scope(scope):
     if div_val == 1:
       lookup_table =\
-        tf.compat.v1.get_variable('lookup_table', [n_token, d_embed],
+        tf.compat.v1.get_variable('lookup_table',
+                                  [n_token, d_embed],
                                   initializer=initializer)
-      arg_y = embedding_lookup(lookup_table, arg_x)
+      arg_y = tf.nn.embedding_lookup(lookup_table, arg_x)
 
       if d_proj != d_embed:
         proj_wgt =\
           tf.compat.v1.get_variable('proj_W', [d_embed, d_proj],
                                     initializer=proj_initializer)
+        # Matrix multiplication
         arg_y = tf.einsum('ibe,ed->ibd', arg_y, proj_wgt)
       else:
         proj_wgt = None
       ret_params = [lookup_table, proj_wgt]
 
-    else:
+    else: # multiple tables and proj_wgts
       tables, projs = [], []
-      cutoff_ends = [0] + cutoffs + [n_token]
+
+      # cutoffs are related to n_tokes!
+      cutoff_ends = [0] + cutoffs + [n_token] # so cutoffs[1:-1]
+
+      # is it not index?? or just to wants to know the length of sequences?
       x_size = tf.shape(arg_x)
+
+      # projection dimension labels
       arg_y = tf.zeros([x_size[0], x_size[1], d_proj])
+
       for i in range(len(cutoff_ends) - 1):
         with tf.compat.v1.variable_scope('cutoff_{}'.format(i)):
           l_idx, r_idx = cutoff_ends[i], cutoff_ends[i + 1]
           mask = (arg_x >= l_idx) & (arg_x < r_idx)
           cur_x = tf.boolean_mask(arg_x, mask) - l_idx
-          cur_d_embed = d_embed // (div_val ** i)
+          cur_d_embed = d_embed // (div_val ** i) # floor(d_embed / power(div_val, i))
+
           lookup_table = \
             tf.compat.v1.get_variable('lookup_table',
                                       [r_idx - l_idx, cur_d_embed],
                                       initializer=initializer)
-          cur_y = embedding_lookup(lookup_table, cur_x)
+
+          cur_y = tf.nn.embedding_lookup(lookup_table, cur_x)
+
           if d_proj == cur_d_embed and not proj_same_dim:
             proj_wgt = None
           else:
@@ -159,14 +181,17 @@ def mask_adaptive_embedding_lookup(arg_x, n_token, d_embed, d_proj, cutoffs,
               tf.compat.v1.get_variable('proj_W', [cur_d_embed, d_proj],
                                         initializer=proj_initializer)
             cur_y = tf.einsum('id,de->ie', cur_y, proj_wgt)
+
           mask_idx = tf.to_int64(tf.where(mask))
           arg_y += tf.scatter_nd(mask_idx, cur_y, tf.to_int64(tf.shape(arg_y)))
           tables.append(lookup_table)
           projs.append(proj_wgt)
+
       ret_params = [tables, projs]
 
-  arg_y *= emb_scale
-  return arg_y, ret_params
+  # Question: why is sqrt(d_proj) a embedding scale?
+  emb_scale = d_proj ** 0.5
+  return arg_y * emb_scale, ret_params
 
 def mask_adaptive_logsoftmax(hidden, target, n_token, d_embed, d_proj, cutoffs,
                              params, tie_projs,
@@ -255,46 +280,43 @@ def mask_adaptive_logsoftmax(hidden, target, n_token, d_embed, d_proj, cutoffs,
   return nll
 
 
-def _create_mask(qlen, mlen, same_length=False):
-  attn_mask = tf.ones([qlen, qlen])
-  mask_u = tf.linalg.band_part(attn_mask, 0, -1)
-  mask_dia = tf.linalg.band_part(attn_mask, 0, 0)
-  attn_mask_pad = tf.zeros([qlen, mlen])
-  ret = tf.concat([attn_mask_pad, mask_u - mask_dia], 1)
-  if same_length:
-    mask_l = tf.linalg.band_part(attn_mask, -1, 0)
-    ret = tf.concat([ret[:, :qlen] + mask_l - mask_dia, ret[:, qlen:]], 1)
-  return ret
-
-
-def _cache_mem(curr_out, prev_mem, mem_len=None):
-  if mem_len is None or prev_mem is None:
-    new_mem = curr_out
-  elif mem_len == 0:
-    return prev_mem
-  else:
-    new_mem = tf.concat([prev_mem, curr_out], 0)[- mem_len:] #pylint: disable=invalid-unary-operand-type
-
-  return tf.stop_gradient(new_mem)
-
-
 def transformer(dec_inp, target, mems, n_token, n_layer, d_model, d_embed,
                 n_head, d_head, d_inner, dropout, dropatt,
                 initializer, is_training, proj_initializer=None,
-                mem_len=None, cutoffs=[], div_val=1, tie_projs=[],
-                same_length=False, clamp_len=-1, use_tpu=True,
-                input_perms=None, target_perms=None, head_target=None,
+                mem_len=None, cutoffs=None, div_val=1, tie_projs=None,
+                same_length=False, clamp_len=-1,
                 untie_r=False, proj_same_dim=True,
                 scope='transformer'):
   """
-  cutoffs: a list of python int. Cutoffs for adaptive softmax.
-  tie_projs: a list of python bools. Whether to tie the projections.
-  use_tpu: if True, use one_hot in embedding lookup and bin-based implementation
-        of adaptive softmax.
-  perms: a list of tensors. Each tensor should of size [len, bsz, bin_size].
-        Only used in the adaptive setting.
+
+  :param dec_inp:
+  :param target:
+  :param mems:
+  :param n_token:
+  :param n_layer:
+  :param d_model:
+  :param d_embed:
+  :param n_head:
+  :param d_head:
+  :param d_inner:
+  :param dropout:
+  :param dropatt:
+  :param initializer:
+  :param is_training:
+  :param proj_initializer:
+  :param mem_len:
+  :param cutoffs: a list of python int. Cutoffs for adaptive softmax.
+  :param div_val:
+  :param tie_projs: a list of python bools. Whether to tie the projections.
+  :param same_length:
+  :param clamp_len:
+  :param untie_r:
+  :param proj_same_dim:
+  :param scope: the name of a variable scope
+  :return: a transformer model
   """
-  new_mems = []
+  new_mems = [] # new cached memories from this segment
+
   with tf.compat.v1.variable_scope(scope):
     if untie_r:
       r_w_bias =\
@@ -318,6 +340,7 @@ def transformer(dec_inp, target, mems, n_token, n_layer, d_model, d_embed,
     if proj_initializer is None:
       proj_initializer = initializer
 
+    # Get Input embeddings, why adaptive
     embeddings, shared_params =\
       mask_adaptive_embedding_lookup(arg_x=dec_inp,
                                      n_token=n_token,
@@ -329,8 +352,18 @@ def transformer(dec_inp, target, mems, n_token, n_layer, d_model, d_embed,
                                      div_val=div_val,
                                      proj_same_dim=proj_same_dim)
 
-    attn_mask = _create_mask(qlen, mlen, same_length)
+    # Creating attention mask
+    attn_mask = tf.ones([qlen, qlen])
+    mask_u = tf.linalg.band_part(attn_mask, 0, -1)
+    mask_dia = tf.linalg.band_part(attn_mask, 0, 0)
+    attn_mask_pad = tf.zeros([qlen, mlen])
+    ret = tf.concat([attn_mask_pad, mask_u - mask_dia], 1)
+    if same_length:
+      mask_l = tf.linalg.band_part(attn_mask, -1, 0)
+      ret = tf.concat([ret[:, :qlen] + mask_l - mask_dia, ret[:, qlen:]], 1)
+    attn_mask = ret
 
+    # Positional embedding
     pos_seq = tf.range(klen - 1, -1, -1.0)
     if clamp_len > 0:
       pos_seq = tf.minimum(pos_seq, clamp_len)
@@ -345,43 +378,56 @@ def transformer(dec_inp, target, mems, n_token, n_layer, d_model, d_embed,
 
     for i in range(n_layer):
       # cache new mems
+      def _cache_mem(curr_out, prev_mem, mem_len=None):
+        if mem_len is None or prev_mem is None:
+          new_mem = curr_out
+        elif mem_len == 0:
+          return prev_mem
+        else:
+          new_mem = tf.concat([prev_mem, curr_out], 0)[
+                    - mem_len:]  # pylint: disable=invalid-unary-operand-type
+
+        return tf.stop_gradient(new_mem)
+
       new_mems.append(_cache_mem(output, mems[i], mem_len))
 
       with tf.compat.v1.variable_scope('layer_{}'.format(i)):
-        output = rel_multihead_attn(
-            arg_w=output,
-            arg_r=pos_emb,
-            r_w_bias=r_w_bias if not untie_r else r_w_bias[i],
-            r_r_bias=r_r_bias if not untie_r else r_r_bias[i],
-            attn_mask=attn_mask,
-            mems=mems[i],
-            d_model=d_model,
-            n_head=n_head,
-            d_head=d_head,
-            dropout=dropout,
-            dropatt=dropatt,
-            is_training=is_training,
-            kernel_initializer=initializer)
-        output = positionwise_FF(
-            inp=output,
-            d_model=d_model,
-            d_inner=d_inner,
-            dropout=dropout,
-            kernel_initializer=initializer,
-            is_training=is_training)
+        output =\
+          rel_multihead_attn(arg_w=output,
+                             arg_r=pos_emb,
+                             r_w_bias=r_w_bias if not untie_r else r_w_bias[i],
+                             r_r_bias=r_r_bias if not untie_r else r_r_bias[i],
+                             attn_mask=attn_mask,
+                             mems=mems[i],
+                             d_model=d_model,
+                             n_head=n_head,
+                             d_head=d_head,
+                             dropout=dropout,
+                             dropatt=dropatt,
+                             is_training=is_training,
+                             kernel_initializer=initializer)
+
+        output =\
+          positionwise_FF(inp=output,
+                          d_model=d_model,
+                          d_inner=d_inner,
+                          dropout=dropout,
+                          kernel_initializer=initializer,
+                          is_training=is_training)
 
     output = tf.layers.dropout(output, dropout, training=is_training)
 
-    loss = mask_adaptive_logsoftmax(hidden=output,
-                         target=target,
-                         n_token=n_token,
-                         d_embed=d_embed,
-                         d_proj=d_model,
-                         cutoffs=cutoffs,
-                         params=shared_params,
-                         tie_projs=tie_projs,
-                         initializer=initializer,
-                         proj_initializer=proj_initializer,
-                         div_val=div_val,
-                         proj_same_dim=proj_same_dim)
+    loss =\
+      mask_adaptive_logsoftmax(hidden=output,
+                               target=target,
+                               n_token=n_token,
+                               d_embed=d_embed,
+                               d_proj=d_model,
+                               cutoffs=cutoffs,
+                               params=shared_params,
+                               tie_projs=tie_projs,
+                               initializer=initializer,
+                               proj_initializer=proj_initializer,
+                               div_val=div_val,
+                               proj_same_dim=proj_same_dim)
     return loss, new_mems

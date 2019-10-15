@@ -181,83 +181,72 @@ def average_grads_and_vars(tower_grads_and_vars):
   return return_value_of_average_grads_and_vars
 
 
-def get_model_fn(n_token, cutoffs):
-  def model_fn(inp, tgt, mems, is_training):
-    inp = tf.transpose(inp, [1, 0])
-    tgt = tf.transpose(tgt, [1, 0])
+def single_core_graph(inp, tgt, mems, is_training, n_token, cutoffs):
+  # batch major to time major?
+  inp = tf.transpose(inp, [1, 0])
+  tgt = tf.transpose(tgt, [1, 0])
 
-    if FLAGS.init == "uniform":
-      initializer =\
-        tf.initializers.random_uniform(minval=-FLAGS.init_range,
-                                       maxval=FLAGS.init_range,
-                                       seed=None)
-    elif FLAGS.init == "normal":
-      initializer =\
-        tf.initializers.random_normal(stddev=FLAGS.init_std, seed=None)
-      proj_initializer =\
-        tf.initializers.random_normal(stddev=FLAGS.proj_init_std, seed=None)
+  initializer = None
+  proj_initializer = None
 
-    tie_projs = [False for _ in range(len(cutoffs) + 1)]
-    if FLAGS.proj_share_all_but_first:
-      for i in range(1, len(tie_projs)):
-        tie_projs[i] = True
+  if FLAGS.init == "uniform":
+    initializer =\
+      tf.initializers.random_uniform(minval=-FLAGS.init_range,
+                                     maxval=FLAGS.init_range,
+                                     seed=None)
+  elif FLAGS.init == "normal":
+    initializer =\
+      tf.initializers.random_normal(stddev=FLAGS.init_std, seed=None)
+    proj_initializer =\
+      tf.initializers.random_normal(stddev=FLAGS.proj_init_std, seed=None)
 
-    loss, new_mems =\
-      model.transformer(dec_inp=inp,
-                        target=tgt,
-                        mems=mems,
-                        n_token=n_token,
-                        n_layer=FLAGS.n_layer,
-                        d_model=FLAGS.d_model,
-                        d_embed=FLAGS.d_embed,
-                        n_head=FLAGS.n_head,
-                        d_head=FLAGS.d_head,
-                        d_inner=FLAGS.d_inner,
-                        dropout=FLAGS.dropout,
-                        dropatt=FLAGS.dropatt,
-                        initializer=initializer,
-                        proj_initializer=proj_initializer,
-                        is_training=is_training,
-                        mem_len=FLAGS.mem_len,
-                        cutoffs=cutoffs,
-                        div_val=FLAGS.div_val,
-                        tie_projs=tie_projs,
-                        input_perms=None,
-                        target_perms=None,
-                        head_target=None,
-                        same_length=FLAGS.same_length,
-                        clamp_len=FLAGS.clamp_len,
-                        use_tpu=False,
-                        untie_r=FLAGS.untie_r,
-                        proj_same_dim=FLAGS.proj_same_dim)
+  # tie_projs .. all False? cutoffs ??
+  tie_projs = [False for _ in range(len(cutoffs) + 1)]
+  if FLAGS.proj_share_all_but_first:
+    for i in range(1, len(tie_projs)):
+      tie_projs[i] = True
 
-    # number of parameters
-    num_params =\
-      sum([np.prod(v.shape) for v in tf.compat.v1.trainable_variables()])
-    tf.compat.v1.logging.info('#params: {}'.format(num_params))
-
-    # legacy comment
-    # format_str = '{{:<{0}s}}\t{{}}'.format(
-    #     max([len(v.name) for v in tf.trainable_variables()]))
-    # for v in tf.trainable_variables():
-    #   tf.compat.v1.logging.info(format_str.format(v.name, v.get_shape()))
-
-    if is_training:
-      all_vars = tf.compat.v1.trainable_variables()
-      grads = tf.gradients(loss, all_vars)
-      grads_and_vars = list(zip(grads, all_vars))
-      return loss, new_mems, grads_and_vars
-
-    return loss, new_mems
-
-  return model_fn
+  loss, new_mems =\
+    model.transformer(dec_inp=inp, # [1:-1], why not zero?
+                      target=tgt,  # [2:]
+                      mems=mems, # 3.2 Segment-Level Recurrent with State
+                      # Reuse ?
+                      n_token=n_token,
+                      n_layer=FLAGS.n_layer,
+                      d_model=FLAGS.d_model, # dimension of hidden
+                      d_embed=FLAGS.d_embed, # dimension of embedded
+                      n_head=FLAGS.n_head, # number of heads in multi-head att.
+                      d_head=FLAGS.d_head, # dimension of head
+                      d_inner=FLAGS.d_inner, # dim of inner ??
+                      dropout=FLAGS.dropout, # dropout rate
+                      dropatt=FLAGS.dropatt, # dropout attention ??
+                      initializer=initializer,
+                      proj_initializer=proj_initializer,
+                      is_training=is_training,
+                      mem_len=FLAGS.mem_len, # how many segments
+                      cutoffs=cutoffs, # ??
+                      div_val=FLAGS.div_val, # ?? problematic variable.. why
+                      # divide variables?
+                      tie_projs=tie_projs, # ?? it is related to cutoffs
+                      same_length=FLAGS.same_length, # ??
+                      clamp_len=FLAGS.clamp_len, # clamp length..?
+                      untie_r=FLAGS.untie_r, # untie ??
+                      proj_same_dim=FLAGS.proj_same_dim
+                      )
 
 
-def single_core_graph(n_token, cutoffs, is_training, inp, tgt, mems):
-  model_fn = get_model_fn(n_token=n_token, cutoffs=cutoffs)
-  model_ret = model_fn(inp=inp, tgt=tgt, mems=mems, is_training=is_training)
+  # number of parameters
+  num_params =\
+    sum([np.prod(v.shape) for v in tf.compat.v1.trainable_variables()])
+  tf.compat.v1.logging.info('#params: {}'.format(num_params))
 
-  return model_ret
+  if is_training:
+    all_vars = tf.compat.v1.trainable_variables()
+    grads = tf.gradients(loss, all_vars)
+    grads_and_vars = list(zip(grads, all_vars))
+    return loss, new_mems, grads_and_vars
+
+  return loss, new_mems
 
 
 def train(n_token, cutoffs, ps_device):
@@ -267,8 +256,7 @@ def train(n_token, cutoffs, ps_device):
       split="train",
       per_host_bsz=FLAGS.train_batch_size,
       tgt_len=FLAGS.tgt_len,
-      num_core_per_host=FLAGS.num_core_per_host,
-      num_hosts=1)
+      num_core_per_host=FLAGS.num_core_per_host)
 
   tf.compat.v1.logging.info("num of batches {}".format(train_record_info["num_batch"]))
 
@@ -284,25 +272,29 @@ def train(n_token, cutoffs, ps_device):
 
   per_core_bsz = FLAGS.train_batch_size // FLAGS.num_core_per_host
 
+  # initializing variable for each gpu
   tower_mems, tower_losses, tower_new_mems, tower_grads_and_vars = [], [], [], []
 
+  # building up towers
   for i in range(FLAGS.num_core_per_host):
     reuse = True if i > 0 else None
     with tf.device(assign_to_gpu(i, ps_device)), \
         tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(), reuse=reuse):
 
+      # previous segment states, mem_len is the number of segments per core
       mems_i = [tf.compat.v1.placeholder(tf.float32,
                                          [FLAGS.mem_len, per_core_bsz,
                                           FLAGS.d_model])
                 for _ in range(FLAGS.n_layer)]
 
-      loss_i, new_mems_i, grads_and_vars_i = single_core_graph(
-          n_token=n_token,
-          cutoffs=cutoffs,
-          is_training=True,
-          inp=inputs[i],
-          tgt=labels[i],
-          mems=mems_i)
+      loss_i, new_mems_i, grads_and_vars_i =\
+        single_core_graph(inp=inputs[i],
+                          tgt=labels[i],
+                          mems=mems_i,
+                          is_training=True,
+                          n_token=n_token,
+                          cutoffs=cutoffs,
+                          )
 
       tower_mems.append(mems_i)
       tower_losses.append(loss_i)
@@ -325,7 +317,7 @@ def train(n_token, cutoffs, ps_device):
   ## configure the optimizer
   global_step = tf.compat.v1.train.get_or_create_global_step()
 
-  # warmup stage: increase the learning rate linearly
+  # warm-up stage: increase the learning rate linearly
   if FLAGS.warmup_steps > 0:
     warmup_lr = tf.to_float(global_step) / tf.to_float(FLAGS.warmup_steps) \
                 * FLAGS.learning_rate
@@ -351,15 +343,14 @@ def train(n_token, cutoffs, ps_device):
   tower_mems_np = [
       [np.zeros([FLAGS.mem_len, per_core_bsz, FLAGS.d_model],
                 dtype=np.float32) # pylint: disable=no-member
-       for layer in range(FLAGS.n_layer)] # pylint: disable=unused-variable
-      for core in range(FLAGS.num_core_per_host) # pylint: disable=unused-variable
+       for _ in range(FLAGS.n_layer)] # pylint: disable=unused-variable
+      for _ in range(FLAGS.num_core_per_host) # pylint: disable=unused-variable
   ]
 
   saver = tf.compat.v1.train.Saver()
 
-  with tf.compat.v1.Session(config=\
-                            tf.compat.v1.ConfigProto(allow_soft_placement=True))\
-          as sess:
+  with tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(
+                              allow_soft_placement=True))as sess:
     sess.run(tf.compat.v1.global_variables_initializer())
 
     if FLAGS.warm_start_path is not None:
@@ -369,6 +360,7 @@ def train(n_token, cutoffs, ps_device):
     fetches = [loss, tower_new_mems, global_step, gnorm, learning_rate, train_op]
 
     total_loss, prev_step = 0., -1
+
     while True:
       feed_dict = {}
       for i in range(FLAGS.num_core_per_host):
@@ -405,8 +397,7 @@ def evaluate(n_token, cutoffs, ps_device):
       split=FLAGS.eval_split,
       per_host_bsz=FLAGS.eval_batch_size,
       tgt_len=FLAGS.tgt_len,
-      num_core_per_host=FLAGS.num_core_per_host,
-      num_hosts=1)
+      num_core_per_host=FLAGS.num_core_per_host)
 
   num_batch = eval_record_info["num_batch"]
   if FLAGS.max_eval_batch > 0:
@@ -434,13 +425,14 @@ def evaluate(n_token, cutoffs, ps_device):
                                [FLAGS.mem_len, per_core_bsz, FLAGS.d_model])
                 for _ in range(FLAGS.n_layer)]
 
-      loss_i, new_mems_i = single_core_graph(
-          n_token=n_token,
-          cutoffs=cutoffs,
-          is_training=False,
-          inp=inputs[i],
-          tgt=labels[i],
-          mems=mems_i)
+      loss_i, new_mems_i = \
+        single_core_graph(inp=inputs[i],
+                          tgt=labels[i],
+                          mems=mems_i,
+                          is_training=False,
+                          n_token=n_token,
+                          cutoffs=cutoffs
+                          )
 
       tower_mems.append(mems_i)
       tower_losses.append(loss_i)
@@ -455,8 +447,8 @@ def evaluate(n_token, cutoffs, ps_device):
   ##### Evaluation loop
   tower_mems_np = [
       [np.zeros([FLAGS.mem_len, per_core_bsz, FLAGS.d_model], dtype=np.float32) # pylint: disable=no-member
-       for layer in range(FLAGS.n_layer)] # pylint: disable=unused-variable
-      for core in range(FLAGS.num_core_per_host) # pylint: disable=unused-variable
+       for _ in range(FLAGS.n_layer)] # pylint: disable=unused-variable
+      for _ in range(FLAGS.num_core_per_host) # pylint: disable=unused-variable
   ]
 
   saver = tf.train.Saver()
@@ -503,15 +495,17 @@ def main(unused_argv):
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
   # Get corpus info
-  corpus_info = data_utils.get_corpus_info(FLAGS.corpus_info_path)
-  n_token = corpus_info["vocab_size"]
-  cutoffs = corpus_info["cutoffs"][1:-1]
-  tf.compat.v1.logging.info("n_token {}".format(n_token))
+  with open(FLAGS.corpus_info_path, "r") as fp:
+    import json
+    corpus_info = json.load(fp)
+    n_token = corpus_info["vocab_size"]
+    cutoffs = corpus_info["cutoffs"][1:-1]
+    tf.compat.v1.logging.info("n_token {}".format(n_token))
 
-  if FLAGS.do_train:
-    train(n_token, cutoffs, "/gpu:0")
-  if FLAGS.do_eval:
-    evaluate(n_token, cutoffs, "/gpu:0")
+    if FLAGS.do_train:
+      train(n_token, cutoffs, "/gpu:0")
+    if FLAGS.do_eval:
+      evaluate(n_token, cutoffs, "/gpu:0")
 
 
 if __name__ == "__main__":
