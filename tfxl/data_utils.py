@@ -42,7 +42,8 @@ def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len, num_shuffle):
   num_batch = 0
 
   path = train[shard]
-  data_shard = vocab.encode_file(path, ordered=False, add_double_eos=True)
+  data_shard = vocab.encode_file(path, ordered=False,
+                                 add_eos=False, add_double_eos=True)
 
   for shuffle in range(num_shuffle):
     basename = "train-{:03d}-{:02d}".format(shard, shuffle)
@@ -57,26 +58,30 @@ def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len, num_shuffle):
   return file_names, num_batch
 
 
-class Corpus(object):
-  def __init__(self, path, *args, **kwargs):
+class Corpus():
+  def __init__(self, path, add_eos, add_beos, *args, **kwargs):
     self.vocab = Vocab(*args, **kwargs)
-
+    self.add_eos = add_eos
+    self.add_beos = add_beos
     self.vocab.build_vocab()
     pattern = os.path.join(path, "train", "train.??")
     self.train = glob(pattern)
-    print(self.train)
-    self.valid = self.vocab.encode_file(
-        os.path.join(path, "valid.txt"), ordered=True, add_eos=True)
-    self.test = self.vocab.encode_file(
-        os.path.join(path, "test.txt"), ordered=True, add_eos=True)
+
+    self.valid = \
+      self.vocab.encode_file(os.path.join(path, "valid.txt"),
+                             ordered=True, add_eos=self.add_eos,
+                             add_beos=self.add_beos)
+    self.test = \
+      self.vocab.encode_file(os.path.join(path, "test.txt"),
+                             ordered=True, add_eos=self.add_eos,
+                             add_beos=self.add_beos)
 
     # Example self.cutoffs = [0, 60000, 100000, 640000] + [len(self.vocab)]
     self.cutoffs = []
 
   def convert_to_tfrecords(self, split, save_dir, bsz, tgt_len,
                            num_core_per_host, **kwargs):
-    config_flags = kwargs.get('FLAGS')
-
+    config_flags = kwargs.get("FLAGS")
     file_names = []
     record_name = \
       "record_info-{}.bsz-{}.tlen-{}.json".format(split, bsz, tgt_len)
@@ -105,7 +110,8 @@ class Corpus(object):
       else:
         for shard, path in enumerate(self.train):
           data_shard = self.vocab.encode_file(path, ordered=False,
-                                              add_double_eos=True)
+                                              add_eos=self.add_eos,
+                                              add_beos=self.add_beos)
 
           num_shuffle = config_flags.num_shuffle
 
@@ -170,13 +176,6 @@ def _float_feature(values):
 
 def batchify(data, batch_size):
   """
-    if use_tpu = True: num_passes > 1
-
-    Since TPU training requires entire [bsz x tgt_len] chunks, it can discard
-    as many as `bsz * tgt_len` tokens in training. When `bsz` and `tgt_len` are
-    both large, as in the case of TPU training for Transformer-XL, the problem
-    may lead to detectable performance drop.
-
     Here, we use multiple randomly shifted copies to deal with this problem.
   """
   num_step = len(data) // batch_size
@@ -234,7 +233,8 @@ def get_lm_corpus(data_dir):
     kwargs["lower_case"] = True
     kwargs["vocab_file"] = os.path.join(data_dir, FLAGS.vocab)
 
-    corpus = Corpus(data_dir, **kwargs)
+    corpus = Corpus(data_dir, add_eos=FLAGS.add_eos,
+                    add_beos=FLAGS.add_beos, **kwargs)
 
     print("Saving dataset...")
     with open(cache_pkl_path, "wb") as fp:
@@ -392,6 +392,11 @@ def get_corpus_info(corpus_info_path):
 
 if __name__ == "__main__":
   FLAGS = flags.FLAGS
+  flags.DEFINE_bool("add_eos", default=False,
+                    help="whether to add </s> symbol")
+  flags.DEFINE_bool("add_beos", default=True,
+                    help="whether to add <s> and </s> symbol, add_eos will be "
+                         "disabled when add_beos is set to True.")
   flags.DEFINE_string("data_dir", None, help="Location of the data corpus")
   flags.DEFINE_integer("per_host_train_bsz", 60, help="train batch size each "
                                                       "host")

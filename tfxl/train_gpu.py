@@ -30,7 +30,6 @@ import tensorflow as tf
 
 import tfxl.model as model
 import tfxl.data_utils as data_utils
-from tfxl.gpu_utils import assign_to_gpu, average_grads_and_vars
 
 # GPU config
 flags.DEFINE_integer("num_hosts", default=1, help="Number of TPU hosts")
@@ -131,6 +130,56 @@ flags.DEFINE_float("init_range", default=0.1,
                    help="Initialization std when init is uniform.")
 
 FLAGS = flags.FLAGS
+
+def assign_to_gpu(gpu=0, ps_dev="/device:CPU:0"):
+  def _assign(operation):
+    node_def = operation if isinstance(operation,
+                                       tf.compat.v1.NodeDef) else operation.node_def
+    if node_def.op == "Variable":
+      return ps_dev
+    return "/gpu:%d" % gpu
+  return _assign
+
+
+def average_grads_and_vars(tower_grads_and_vars):
+  def average_dense(grad_and_vars_avg_dense):
+    if len(grad_and_vars_avg_dense) == 1:
+      return grad_and_vars_avg_dense[0][0]
+
+    grad_avg_dense = grad_and_vars_avg_dense[0][0]
+    for curr_grad, _ in grad_and_vars_avg_dense[1:]:
+      grad_avg_dense += curr_grad
+    return grad_avg_dense / len(grad_and_vars_avg_dense)
+
+  def average_sparse(grad_and_vars_avg_sparse):
+    if len(grad_and_vars_avg_sparse) == 1:
+      return grad_and_vars_avg_sparse[0][0]
+
+    indices = []
+    values = []
+    for grad_and_val_idx, _ in grad_and_vars_avg_sparse:
+      indices += [grad_and_val_idx.indices]
+      values += [grad_and_val_idx.values]
+    indices = tf.concat(indices, 0)
+    values = tf.concat(values, 0) / len(grad_and_vars_avg_sparse)
+    return tf.IndexedSlices(values, indices, grad_and_vars_avg_sparse[0][0].dense_shape)
+
+  return_value_of_average_grads_and_vars = []
+  for grad_and_vars in zip(*tower_grads_and_vars):
+    if grad_and_vars[0][0] is None:
+      grad = None
+    elif isinstance(grad_and_vars[0][0], tf.IndexedSlices):
+      grad = average_sparse(grad_and_vars)
+    else:
+      grad = average_dense(grad_and_vars)
+    # Keep in mind that the Variables are redundant because they are shared
+    # across towers. So .. we will just return the first tower's pointer to
+    # the Variable.
+    variances = grad_and_vars[0][1]
+    grad_and_var = (grad, variances)
+    return_value_of_average_grads_and_vars.append(grad_and_var)
+  return return_value_of_average_grads_and_vars
+
 
 def get_model_fn(n_token, cutoffs):
   def model_fn(inp, tgt, mems, is_training):

@@ -20,6 +20,7 @@
 import tensorflow as tf # pylint: disable=import-error
 
 def positional_embedding(pos_seq, inv_freq, bsz=None):
+  # outer product between post_seq and inv_freq
   sinusoid_inp = tf.einsum('i,j->ij', pos_seq, inv_freq)
   pos_emb = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], -1)
   if bsz is not None:
