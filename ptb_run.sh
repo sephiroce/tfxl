@@ -16,6 +16,7 @@ D_INNER=512
 # Training
 TGT_LEN=128
 MEM_LEN=128
+NUM_CORE=2
 
 BSZ=24
 
@@ -23,6 +24,7 @@ BSZ=24
 TEST_TGT_LEN=80
 TEST_MEM_LEN=2100
 TEST_CLAMP_LEN=820
+TEST_NUM_CORE=1
 
 TEST_BSZ=8
 
@@ -34,6 +36,8 @@ if [[ $1 == 'train_data' ]]; then
         --tgt_len=${TGT_LEN} \
         --per_host_train_bsz=${BSZ} \
         --per_host_valid_bsz=${BSZ} \
+        --add_eos=False \
+        --add_beos=True \
         ${@:2}
 elif [[ $1 == 'test_data' ]]; then
     python tfxl/data_utils.py \
@@ -42,6 +46,8 @@ elif [[ $1 == 'test_data' ]]; then
         --dataset=${NAME} \
         --tgt_len=${TEST_TGT_LEN} \
         --per_host_test_bsz=${TEST_BSZ} \
+        --add_eos=False \
+        --add_beos=True \
         ${@:2}
 elif [[ $1 == 'train' ]]; then
     echo 'Run training...'
@@ -65,6 +71,7 @@ elif [[ $1 == 'train' ]]; then
         --tgt_len=${TGT_LEN} \
         --mem_len=${MEM_LEN} \
         --train_batch_size=${BSZ} \
+        --num_core_per_host=${NUM_CORE} \
         --iterations=200 \
         --save_steps=4000 \
         --do_train=True \
@@ -75,7 +82,7 @@ elif [[ $1 == 'eval' ]]; then
     python tfxl/train_gpu.py \
         --data_dir=${DATA_ROOT}/tfrecords \
         --vocab=${NAME}.vocab \
-        --record_info_dir=${DATA_ROOT}/tfrecords/ \
+        --record_info_dir=${DATA_ROOT}/tfrecords \
         --corpus_info_path=${DATA_ROOT}/corpus-info.json \
         --model_dir=EXP-${NAME} \
         --n_layer=${N_LAYER} \
@@ -91,9 +98,30 @@ elif [[ $1 == 'eval' ]]; then
         --clamp_len=${TEST_CLAMP_LEN} \
         --same_length=True \
         --eval_batch_size=${TEST_BSZ} \
+        --num_core_per_host=${TEST_NUM_CORE} \
         --do_train=False \
         --do_eval=True \
         --eval_split=test \
+        ${@:2}
+elif [[ $1 == 'dist' ]]; then
+    echo 'Run getdist...'
+    python tfxl/train_gpu.py \
+        --vocab=${DATA_ROOT}/${NAME}.vocab \
+        --model_dir=EXP-${NAME} \
+        --n_layer=${N_LAYER} \
+        --d_model=${D_MODEL} \
+        --d_embed=${D_EMBED} \
+        --n_head=${N_HEAD} \
+        --d_head=${D_HEAD} \
+        --d_inner=${D_INNER} \
+        --dropout=0.0 \
+        --dropatt=0.0 \
+        --mem_len=${TEST_MEM_LEN} \
+        --clamp_len=${TEST_CLAMP_LEN} \
+        --same_length=True \
+        --do_train=False \
+        --do_eval=False \
+        --do_decode=True \
         ${@:2}
 else
     echo 'unknown argment 1'

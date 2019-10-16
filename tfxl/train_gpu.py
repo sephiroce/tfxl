@@ -32,7 +32,6 @@ import tfxl.model as model
 import tfxl.data_utils as data_utils
 
 # GPU config
-flags.DEFINE_integer("num_hosts", default=1, help="Number of TPU hosts")
 flags.DEFINE_integer("num_core_per_host", default=8,
                      help="Number of cores per host")
 
@@ -81,6 +80,7 @@ flags.DEFINE_integer("save_steps", default=10000, help="number of steps for "
 
 # Evaluation config
 flags.DEFINE_bool("do_test", default=False, help="Run on the test set.")
+flags.DEFINE_bool("do_decode", default=False, help="Get next distribution")
 flags.DEFINE_integer("max_eval_batch", default=-1,
                      help="Set -1 to turn off. Only used in test mode.")
 flags.DEFINE_bool("do_eval_only", default=False, help="Run evaluation only.")
@@ -129,7 +129,10 @@ flags.DEFINE_float("proj_init_std", default=0.01,
 flags.DEFINE_float("init_range", default=0.1,
                    help="Initialization std when init is uniform.")
 
+flags.DEFINE_string("vocab", None, help="vocab filename")
+
 FLAGS = flags.FLAGS
+
 
 def assign_to_gpu(gpu=0, ps_dev="/device:CPU:0"):
   def _assign(operation):
@@ -164,7 +167,7 @@ def average_grads_and_vars(tower_grads_and_vars):
     values = tf.concat(values, 0) / len(grad_and_vars_avg_sparse)
     return tf.IndexedSlices(values, indices, grad_and_vars_avg_sparse[0][0].dense_shape)
 
-  return_value_of_average_grads_and_vars = []
+  avg_grads_and_vars = []
   for grad_and_vars in zip(*tower_grads_and_vars):
     if grad_and_vars[0][0] is None:
       grad = None
@@ -177,11 +180,11 @@ def average_grads_and_vars(tower_grads_and_vars):
     # the Variable.
     variances = grad_and_vars[0][1]
     grad_and_var = (grad, variances)
-    return_value_of_average_grads_and_vars.append(grad_and_var)
-  return return_value_of_average_grads_and_vars
+    avg_grads_and_vars.append(grad_and_var)
+  return avg_grads_and_vars
 
 
-def single_core_graph(inp, tgt, mems, is_training, n_token, cutoffs):
+def single_core_graph(inp, tgt, mems, is_training, n_token):
   # batch major to time major?
   inp = tf.transpose(inp, [1, 0])
   tgt = tf.transpose(tgt, [1, 0])
@@ -200,13 +203,7 @@ def single_core_graph(inp, tgt, mems, is_training, n_token, cutoffs):
     proj_initializer =\
       tf.initializers.random_normal(stddev=FLAGS.proj_init_std, seed=None)
 
-  # tie_projs .. all False? cutoffs ??
-  tie_projs = [False for _ in range(len(cutoffs) + 1)]
-  if FLAGS.proj_share_all_but_first:
-    for i in range(1, len(tie_projs)):
-      tie_projs[i] = True
-
-  loss, new_mems =\
+  loss, new_mems, output =\
     model.transformer(dec_inp=inp, # [1:-1], why not zero?
                       target=tgt,  # [2:]
                       mems=mems, # 3.2 Segment-Level Recurrent with State
@@ -224,16 +221,10 @@ def single_core_graph(inp, tgt, mems, is_training, n_token, cutoffs):
                       proj_initializer=proj_initializer,
                       is_training=is_training,
                       mem_len=FLAGS.mem_len, # how many segments
-                      cutoffs=cutoffs, # ??
-                      div_val=FLAGS.div_val, # ?? problematic variable.. why
-                      # divide variables?
-                      tie_projs=tie_projs, # ?? it is related to cutoffs
                       same_length=FLAGS.same_length, # ??
                       clamp_len=FLAGS.clamp_len, # clamp length..?
                       untie_r=FLAGS.untie_r, # untie ??
-                      proj_same_dim=FLAGS.proj_same_dim
-                      )
-
+                     )
 
   # number of parameters
   num_params =\
@@ -246,10 +237,10 @@ def single_core_graph(inp, tgt, mems, is_training, n_token, cutoffs):
     grads_and_vars = list(zip(grads, all_vars))
     return loss, new_mems, grads_and_vars
 
-  return loss, new_mems
+  return loss, new_mems, output
 
 
-def train(n_token, cutoffs, ps_device):
+def train(n_token, ps_device):
   ##### Get input function and model function
   train_input_fn, train_record_info = data_utils.get_input_fn(
       record_info_dir=FLAGS.record_info_dir,
@@ -292,9 +283,7 @@ def train(n_token, cutoffs, ps_device):
                           tgt=labels[i],
                           mems=mems_i,
                           is_training=True,
-                          n_token=n_token,
-                          cutoffs=cutoffs,
-                          )
+                          n_token=n_token)
 
       tower_mems.append(mems_i)
       tower_losses.append(loss_i)
@@ -349,8 +338,9 @@ def train(n_token, cutoffs, ps_device):
 
   saver = tf.compat.v1.train.Saver()
 
-  with tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(
-                              allow_soft_placement=True))as sess:
+  with tf.compat.v1.Session(config=\
+                            tf.compat.v1.ConfigProto(allow_soft_placement=True)
+                           )as sess:
     sess.run(tf.compat.v1.global_variables_initializer())
 
     if FLAGS.warm_start_path is not None:
@@ -390,7 +380,7 @@ def train(n_token, cutoffs, ps_device):
         break
 
 
-def evaluate(n_token, cutoffs, ps_device):
+def evaluate(n_token, ps_device):
   ##### Get input function and model function
   eval_input_fn, eval_record_info = data_utils.get_input_fn(
       record_info_dir=FLAGS.record_info_dir,
@@ -425,14 +415,12 @@ def evaluate(n_token, cutoffs, ps_device):
                                [FLAGS.mem_len, per_core_bsz, FLAGS.d_model])
                 for _ in range(FLAGS.n_layer)]
 
-      loss_i, new_mems_i = \
+      loss_i, new_mems_i, _ = \
         single_core_graph(inp=inputs[i],
                           tgt=labels[i],
                           mems=mems_i,
                           is_training=False,
-                          n_token=n_token,
-                          cutoffs=cutoffs
-                          )
+                          n_token=n_token)
 
       tower_mems.append(mems_i)
       tower_losses.append(loss_i)
@@ -481,6 +469,7 @@ def evaluate(n_token, cutoffs, ps_device):
       fetched = sess.run(fetches, feed_dict=feed_dict)
 
       loss_np, tower_mems_np, cnt_np = fetched[:3]
+
       total_loss += loss_np * cnt_np
       total_cnt += cnt_np
 
@@ -489,23 +478,88 @@ def evaluate(n_token, cutoffs, ps_device):
         avg_loss, math.exp(avg_loss), avg_loss / math.log(2)))
 
 
-def main(unused_argv):
-  del unused_argv  # Unused
+def get_dist(sentence, n_token=-1, ps_device="/gpu:0"):
+  inputs = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
+  labels = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
 
+  tower_new_mems, tower_output = [], []
+
+  with tf.device(assign_to_gpu(0, ps_device)), \
+      tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(),
+                                  reuse=tf.compat.v1.AUTO_REUSE):
+
+    mems = [tf.compat.v1.placeholder(tf.float32, [FLAGS.mem_len, 1,
+                                                  FLAGS.d_model])
+            for _ in range(FLAGS.n_layer)]
+
+    _, new_mems_i, output_i = \
+      single_core_graph(inp=inputs,
+                        tgt=labels,
+                        mems=mems,
+                        is_training=False,
+                        n_token=n_token)
+
+    tower_new_mems.append(new_mems_i)
+    tower_output.append(output_i)
+
+  ##### Evaluation loop
+  tower_mems_np =\
+      [np.zeros([FLAGS.mem_len, 1, FLAGS.d_model], dtype=np.float32) # pylint: disable=no-member
+       for _ in range(FLAGS.n_layer)] # pylint: disable=unused-variable
+
+  saver = tf.compat.v1.train.Saver()
+
+  with tf.compat.v1.Session(config=\
+          tf.compat.v1.ConfigProto(allow_soft_placement=True)) as sess:
+    sess.run(tf.compat.v1.global_variables_initializer())
+
+    if FLAGS.eval_ckpt_path is None:
+      eval_ckpt_path = tf.train.latest_checkpoint(FLAGS.model_dir)
+    else:
+      eval_ckpt_path = FLAGS.eval_ckpt_path
+    tf.compat.v1.logging.info("Evaluate {}".format(eval_ckpt_path))
+    saver.restore(sess, eval_ckpt_path)
+
+    fetches = [tower_new_mems, tower_output]
+
+    feed_dict = {}
+    feed_dict[inputs] = [sentence[0]]
+    feed_dict[labels] = [sentence[0]]
+    for tower_mem_idx, m_np in zip(mems, tower_mems_np):
+      feed_dict[tower_mem_idx] = m_np
+
+    fetched = sess.run(fetches, feed_dict=feed_dict)
+
+    tower_mems_np, output = fetched[:3]
+
+  return output[0][-1][0]
+
+
+def main(unused_argv):
+  del unused_argv
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
-  # Get corpus info
-  with open(FLAGS.corpus_info_path, "r") as fp:
-    import json
-    corpus_info = json.load(fp)
-    n_token = corpus_info["vocab_size"]
-    cutoffs = corpus_info["cutoffs"][1:-1]
-    tf.compat.v1.logging.info("n_token {}".format(n_token))
+  if FLAGS.do_decode:
+    from tfxl.vocabulary import Vocab
+    vocab = Vocab(min_freq=0, max_size=None, lower_case=True, delimiter=None,
+                  vocab_file=FLAGS.vocab)
+    vocab.build_vocab()
 
-    if FLAGS.do_train:
-      train(n_token, cutoffs, "/gpu:0")
-    if FLAGS.do_eval:
-      evaluate(n_token, cutoffs, "/gpu:0")
+    sent = vocab.encode_sentence("<s> no it was", add_eos=False,
+                                 add_beos=False)
+    output = get_dist(sent, n_token=len(vocab))
+    print(vocab.get_sym(np.argmax(output)))
+  else:
+    with open(FLAGS.corpus_info_path, "r") as fp:
+      import json
+      corpus_info = json.load(fp)
+      n_token = corpus_info["vocab_size"]
+      tf.compat.v1.logging.info("n_token {}".format(n_token))
+
+      if FLAGS.do_train:
+        train(n_token, "/gpu:0")
+      if FLAGS.do_eval:
+        evaluate(n_token, "/gpu:0")
 
 
 if __name__ == "__main__":

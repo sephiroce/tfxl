@@ -121,6 +121,22 @@ class Vocab(object):
 
     return encoded
 
+  def encode_sentence(self, line, add_eos=True, add_beos=False):
+    """
+
+    :param sentence: a sentence to be encoded
+    :param ordered: ordering data ??
+    :param add_eos: whether to add eos or not
+    :param add_beos: whether to add bos and eos or not
+    :return: encoded sentences per file
+    """
+    encoded = []
+    symbols = self.tokenize(line, add_eos=add_eos, add_beos=add_beos)
+    encoded.append(np.array([self.get_idx(sym) for sym in symbols],
+                            dtype=np.int64))
+
+    return encoded
+
   def get_sym(self, idx):
     """
 

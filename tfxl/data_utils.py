@@ -21,7 +21,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import math
 import os
 from functools import partial
 import pickle
@@ -58,7 +57,7 @@ def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len, num_shuffle):
   return file_names, num_batch
 
 
-class Corpus:
+class Corpus(object):
   def __init__(self, path, add_eos, add_beos, *args, **kwargs):
     self.vocab = Vocab(*args, **kwargs)
     self.add_eos = add_eos
@@ -76,15 +75,6 @@ class Corpus:
                              ordered=True, add_eos=self.add_eos,
                              add_beos=self.add_beos)
 
-    if FLAGS.cutoffs.split(", "):
-      self.cutoffs = [0] + [int(cutoff) for cutoff in
-                            FLAGS.cutoffs.split(", ")] + [len(self.vocab)]
-    else:
-      self.cutoffs = []
-
-    print("cutoffs:")
-    print(self.cutoffs)
-
 
   def convert_to_tfrecords(self, split, save_dir, bsz, tgt_len,
                            num_core_per_host, **kwargs):
@@ -95,8 +85,6 @@ class Corpus:
 
     record_info_path = os.path.join(save_dir, record_name)
 
-    bin_sizes = get_bin_sizes(self.valid, bsz // num_core_per_host, tgt_len,
-                              self.cutoffs, [2.5, 2.5, 2.5])
     if split == "train":
       np.random.seed(123456)
       num_batch = 0
@@ -105,8 +93,7 @@ class Corpus:
         #def _preprocess(shard, train, vocab, save_dir, bsz, tgt_len,num_shuffle):
         _preprocess_wrapper = \
           partial(_preprocess, train=self.train, vocab=self.vocab,
-                  save_dir=save_dir,
-                  bin_sizes=bin_sizes, bsz=bsz, tgt_len=tgt_len,
+                  save_dir=save_dir, bsz=bsz, tgt_len=tgt_len,
                   num_core_per_host=num_core_per_host,
                   num_shuffle=config_flags.num_shuffle)
 
@@ -122,7 +109,6 @@ class Corpus:
                                               add_beos=self.add_beos)
 
           num_shuffle = config_flags.num_shuffle
-
           for shuffle in range(num_shuffle):
             print("Processing shard {} shuffle {}".format(shard, shuffle))
             basename = "train-{:03d}-{:02d}".format(shard, shuffle)
@@ -140,41 +126,9 @@ class Corpus:
     with open(record_info_path, "w") as fp:
       record_info = {
           "filenames": file_names,
-          "bin_sizes": bin_sizes,
           "num_batch": num_batch
       }
       json.dump(record_info, fp)
-
-def get_bin_sizes(data, batch_size, tgt_len, cutoffs, std_mult):
-  """
-    Note: the `batch_size` here should be per-core batch size
-  """
-  bin_sizes = []
-
-  def _nearest_to_eight(arg_x): # so that it's faster on TPUs
-    arg_y = arg_x - arg_x % 8
-    return arg_y + 8 if arg_x % 8 >= 4 else max(8, arg_y)
-
-  if cutoffs:
-    num_batch = len(data) // batch_size // tgt_len
-
-    data = data[:batch_size * num_batch * tgt_len]
-    data = data.reshape(batch_size, num_batch, tgt_len)
-
-    tot = batch_size * tgt_len
-    for bin_idx, (left, right) in enumerate(zip(cutoffs[1:-1], cutoffs[2:])):
-      mask = (data >= left) * (data < right)
-      # pylint: disable=no-member
-      percents = mask.astype(np.float64).sum(2).sum(0) / tot
-      mean = np.mean(percents)
-      std = np.std(percents)
-
-      bin_size = int(math.ceil(tgt_len * batch_size * (mean + std_mult[bin_idx]
-                                                       * std)))
-      bin_size = _nearest_to_eight(bin_size)
-      bin_sizes.append(bin_size)
-
-  return bin_sizes
 
 def _int64_feature(values):
   return tf.train.Feature(int64_list=tf.train.Int64List(value=values))
@@ -235,9 +189,8 @@ def get_lm_corpus(data_dir):
       corpus = pickle.load(fp)
   else:
     print("Producing dataset...")
-    kwargs = {}
-    kwargs["lower_case"] = True
-    kwargs["vocab_file"] = os.path.join(data_dir, FLAGS.vocab)
+    kwargs = {"lower_case": True,
+              "vocab_file": os.path.join(data_dir, FLAGS.vocab)}
 
     corpus = Corpus(data_dir, add_eos=FLAGS.add_eos,
                     add_beos=FLAGS.add_beos, **kwargs)
@@ -248,7 +201,6 @@ def get_lm_corpus(data_dir):
 
     corpus_info = {
         "vocab_size" : len(corpus.vocab),
-        "cutoffs" : corpus.cutoffs,
     }
     with open(os.path.join(data_dir, "corpus-info.json"), "w") as fp:
       json.dump(corpus_info, fp)
@@ -359,8 +311,6 @@ def get_input_fn(record_info_dir, split, per_host_bsz, tgt_len,
 
 if __name__ == "__main__":
   FLAGS = flags.FLAGS
-  flags.DEFINE_string("cutoffs", default=None,
-                    help="int, int, int ..")
   flags.DEFINE_bool("add_eos", default=False,
                     help="whether to add </s> symbol")
   flags.DEFINE_bool("add_beos", default=True,
