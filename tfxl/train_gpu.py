@@ -478,76 +478,95 @@ def evaluate(n_token, ps_device):
         avg_loss, math.exp(avg_loss), avg_loss / math.log(2)))
 
 
-def get_dist(sentence, n_token=-1, ps_device="/gpu:0"):
-  inputs = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
-  labels = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
+class Tfxl(object):
+  def __init__(self, n_token, mem_len, d_model, n_layer, eval_ckpt_path):
+    self.n_token = n_token
 
-  tower_new_mems, tower_output = [], []
+    # Building graph
+    self.inputs = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
+    self.labels = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
 
-  with tf.device(assign_to_gpu(0, ps_device)), \
-      tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(),
-                                  reuse=tf.compat.v1.AUTO_REUSE):
+    self.tower_new_mems, self.tower_output = [], []
+    self.mem_len = mem_len
+    self.d_model = d_model
+    self.n_layer = n_layer
 
-    mems = [tf.compat.v1.placeholder(tf.float32, [FLAGS.mem_len, 1,
-                                                  FLAGS.d_model])
-            for _ in range(FLAGS.n_layer)]
+    with tf.device('/gpu:0'), \
+         tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(),
+                                     reuse=tf.compat.v1.AUTO_REUSE):
+      self.mems = [tf.compat.v1.placeholder(tf.float32, [mem_len, 1,
+                                                    d_model])
+              for _ in range(n_layer)]
 
-    _, new_mems_i, output_i = \
-      single_core_graph(inp=inputs,
-                        tgt=labels,
-                        mems=mems,
-                        is_training=False,
-                        n_token=n_token)
+      _, new_mems_i, output_i = \
+        single_core_graph(inp=self.inputs,
+                          tgt=self.labels,
+                          mems=self.mems,
+                          is_training=False,
+                          n_token=self.n_token)
 
-    tower_new_mems.append(new_mems_i)
-    tower_output.append(output_i)
+      self.tower_new_mems.append(new_mems_i)
+      self.tower_output.append(output_i)
 
-  ##### Evaluation loop
-  tower_mems_np =\
-      [np.zeros([FLAGS.mem_len, 1, FLAGS.d_model], dtype=np.float32) # pylint: disable=no-member
-       for _ in range(FLAGS.n_layer)] # pylint: disable=unused-variable
+    self.sess = tf.compat.v1.Session(config= \
+                           tf.compat.v1.ConfigProto(
+                             allow_soft_placement=True))
+    self.sess.run(tf.compat.v1.global_variables_initializer())
 
-  saver = tf.compat.v1.train.Saver()
-
-  with tf.compat.v1.Session(config=\
-          tf.compat.v1.ConfigProto(allow_soft_placement=True)) as sess:
-    sess.run(tf.compat.v1.global_variables_initializer())
-
-    if FLAGS.eval_ckpt_path is None:
-      eval_ckpt_path = tf.train.latest_checkpoint(FLAGS.model_dir)
-    else:
-      eval_ckpt_path = FLAGS.eval_ckpt_path
+    # Loading a Checkpoints
+    saver = tf.compat.v1.train.Saver()
     tf.compat.v1.logging.info("Evaluate {}".format(eval_ckpt_path))
-    saver.restore(sess, eval_ckpt_path)
+    saver.restore(self.sess, eval_ckpt_path)
 
-    fetches = [tower_new_mems, tower_output]
+    # Starting Session
 
-    feed_dict = {}
-    feed_dict[inputs] = [sentence[0]]
-    feed_dict[labels] = [sentence[0]]
-    for tower_mem_idx, m_np in zip(mems, tower_mems_np):
+  def get_dist(self, sent, softmax=False, temperature=1.0):
+    fetches = [self.tower_new_mems, self.tower_output]
+    feed_dict = {self.inputs: [sent[0]], self.labels: [sent[0]]}
+
+    ##### Evaluation loop
+    tower_mems_np = \
+      [np.zeros([self.mem_len, 1, self.d_model], dtype=np.float32)
+       # pylint: disable=no-member
+       for _ in range(self.n_layer)]  # pylint: disable=unused-variable
+    for tower_mem_idx, m_np in zip(self.mems, tower_mems_np):
       feed_dict[tower_mem_idx] = m_np
 
-    fetched = sess.run(fetches, feed_dict=feed_dict)
+    fetched = self.sess.run(fetches, feed_dict=feed_dict)
 
     tower_mems_np, output = fetched[:3]
 
-  return output[0][-1][0]
-
+    logit = output[0][-1][0]
+    if softmax:
+      return np.exp(logit/temperature) / np.sum(np.exp(logit/temperature))
+    return logit
 
 def main(unused_argv):
   del unused_argv
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
   if FLAGS.do_decode:
+    """
+    an example source code snippet for sampling
+    You need a vocabulary file corresponding to the model.
+    """
     from tfxl.vocabulary import Vocab
-    vocab = Vocab(min_freq=0, max_size=None, lower_case=True, delimiter=None,
+    vocab = Vocab(min_freq=0, max_size=None, lower_case=True,
+                      delimiter=None,
                   vocab_file=FLAGS.vocab)
     vocab.build_vocab()
 
-    sent = vocab.encode_sentence("<s> no it was", add_eos=False,
+    # Creating Transformer-XL decoding model
+    if FLAGS.eval_ckpt_path is None:
+      eval_ckpt_path = tf.train.latest_checkpoint(FLAGS.model_dir)
+    else:
+      eval_ckpt_path = FLAGS.eval_ckpt_path
+    tfxl = Tfxl(n_token=len(vocab), mem_len=FLAGS.mem_len,
+                d_model=FLAGS.d_model, n_layer=FLAGS.n_layer,
+                eval_ckpt_path=eval_ckpt_path)
+    sent = vocab.encode_sentence("<s> no it ", add_eos=False,
                                  add_beos=False)
-    output = get_dist(sent, n_token=len(vocab))
+    output = tfxl.get_dist(sent, softmax=True, temperature=1.0)
     print(vocab.get_sym(np.argmax(output)))
   else:
     with open(FLAGS.corpus_info_path, "r") as fp:
