@@ -479,35 +479,69 @@ def evaluate(n_token, ps_device):
 
 
 class Tfxl(object):
-  def __init__(self, n_token, mem_len, d_model, n_layer, eval_ckpt_path):
+  def __init__(self, n_token, eval_ckpt_path, config):
     self.n_token = n_token
 
     # Building graph
     self.inputs = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
     self.labels = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
-
     self.tower_new_mems, self.tower_output = [], []
-    self.mem_len = mem_len
-    self.d_model = d_model
-    self.n_layer = n_layer
+
+    self.mem_len = config["mem_len"]
+    self.d_model = config["d_model"]
+    self.n_layer = config["n_layer"]
+    self.d_embed = config["d_embed"]
+    self.n_head = config["n_head"]
+    self.d_head = config["d_head"]
+    self.d_inner = config["d_inner"]
+    self.dropout = config["dropout"]
+    self.dropatt = config["dropatt"]
+    self.same_length = config["same_length"]
+    self.clamp_len = config["clamp_len"]
+    self.untie_r = config["untie_r"]
 
     with tf.device('/gpu:0'), \
          tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(),
                                      reuse=tf.compat.v1.AUTO_REUSE):
-      self.mems = [tf.compat.v1.placeholder(tf.float32, [mem_len, 1,
-                                                    d_model])
-              for _ in range(n_layer)]
+      self.mems = [tf.compat.v1.placeholder(tf.float32, [self.mem_len, 1,
+                                                         self.d_model])
+                   for _ in range(self.n_layer)]
+
+      # batch major to time major?
+      inp = tf.transpose(self.inputs, [1, 0])
+      tgt = tf.transpose(self.labels, [1, 0])
 
       _, new_mems_i, output_i = \
-        single_core_graph(inp=self.inputs,
-                          tgt=self.labels,
+        model.transformer(dec_inp=inp,
+                          target=tgt,
                           mems=self.mems,
+                          n_token=self.n_token,
+                          n_layer=self.n_layer,
+                          d_model=self.d_model,  # dimension of hidden
+                          d_embed=self.d_embed,  # dimension of embedded
+                          n_head=self.n_head,
+                          d_head=self.d_head,  # dimension of head
+                          d_inner=self.d_inner,  # dim of inner ??
+                          dropout=self.dropout,  # dropout rate
+                          dropatt=self.dropatt,  # dropout attention ??
+                          initializer=None,
+                          proj_initializer=None,
                           is_training=False,
-                          n_token=self.n_token)
+                          mem_len=self.mem_len,  # how many segments
+                          same_length=self.same_length,  # ??
+                          clamp_len=self.clamp_len,  # clamp length..?
+                          untie_r=self.untie_r,  # untie ??
+                          )
+
+      # number of parameters
+      num_params = \
+        sum([np.prod(v.shape) for v in tf.compat.v1.trainable_variables()])
+      tf.compat.v1.logging.info('#params: {}'.format(num_params))
 
       self.tower_new_mems.append(new_mems_i)
       self.tower_output.append(output_i)
 
+    # Starting Session
     self.sess = tf.compat.v1.Session(config= \
                            tf.compat.v1.ConfigProto(
                              allow_soft_placement=True))
@@ -518,17 +552,13 @@ class Tfxl(object):
     tf.compat.v1.logging.info("Evaluate {}".format(eval_ckpt_path))
     saver.restore(self.sess, eval_ckpt_path)
 
-    # Starting Session
-
   def get_dist(self, sent, softmax=False, temperature=1.0):
     fetches = [self.tower_new_mems, self.tower_output]
     feed_dict = {self.inputs: [sent[0]], self.labels: [sent[0]]}
 
-    ##### Evaluation loop
-    tower_mems_np = \
-      [np.zeros([self.mem_len, 1, self.d_model], dtype=np.float32)
-       # pylint: disable=no-member
-       for _ in range(self.n_layer)]  # pylint: disable=unused-variable
+    tower_mems_np = [np.zeros([self.mem_len, 1, self.d_model],
+                              dtype=np.float32) # pylint: disable=no-member
+                     for _ in range(self.n_layer)]  # pylint: disable=unused-variable
     for tower_mem_idx, m_np in zip(self.mems, tower_mems_np):
       feed_dict[tower_mem_idx] = m_np
 
@@ -561,10 +591,22 @@ def main(unused_argv):
       eval_ckpt_path = tf.train.latest_checkpoint(FLAGS.model_dir)
     else:
       eval_ckpt_path = FLAGS.eval_ckpt_path
-    tfxl = Tfxl(n_token=len(vocab), mem_len=FLAGS.mem_len,
-                d_model=FLAGS.d_model, n_layer=FLAGS.n_layer,
-                eval_ckpt_path=eval_ckpt_path)
-    sent = vocab.encode_sentence("<s> no it ", add_eos=False,
+
+    config = {"mem_len": FLAGS.mem_len,
+              "d_model": FLAGS.d_model,
+              "n_layer": FLAGS.n_layer,
+              "d_embed": FLAGS.d_embed,
+              "n_head": FLAGS.n_head,
+              "d_head": FLAGS.d_head,
+              "d_inner": FLAGS.d_inner,
+              "dropout": FLAGS.dropout,
+              "dropatt": FLAGS.dropatt,
+              "same_length": FLAGS.same_length,
+              "clamp_len": FLAGS.clamp_len,
+              "untie_r": FLAGS.untie_r}
+    tfxl = Tfxl(n_token=len(vocab), eval_ckpt_path=eval_ckpt_path,
+                config=config)
+    sent = vocab.encode_sentence("<s> no one", add_eos=False,
                                  add_beos=False)
     output = tfxl.get_dist(sent, softmax=True, temperature=1.0)
     print(vocab.get_sym(np.argmax(output)))
