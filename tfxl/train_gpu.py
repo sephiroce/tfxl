@@ -349,7 +349,7 @@ def train(n_token, ps_device):
       saver.restore(sess, FLAGS.warm_start_path)
 
     fetches = [loss, tower_new_mems, global_step, gnorm, learning_rate,
-               train_op, inputs]
+               train_op]
 
     total_loss, prev_step = 0., -1
 
@@ -362,8 +362,7 @@ def train(n_token, ps_device):
       fetched = sess.run(fetches, feed_dict=feed_dict)
 
       loss_np, tower_mems_np, curr_step = fetched[:3]
-      input = fetched[6]
-      print(input)
+
       total_loss += loss_np
 
       if curr_step > 0 and curr_step % FLAGS.iterations == 0:
