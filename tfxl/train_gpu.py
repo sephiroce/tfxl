@@ -22,6 +22,7 @@ from __future__ import print_function
 
 import os
 import math
+import copy
 
 import numpy as np
 from absl import flags
@@ -347,7 +348,8 @@ def train(n_token, ps_device):
       tf.compat.v1.logging.info("warm start from {}".format(FLAGS.warm_start_path))
       saver.restore(sess, FLAGS.warm_start_path)
 
-    fetches = [loss, tower_new_mems, global_step, gnorm, learning_rate, train_op]
+    fetches = [loss, tower_new_mems, global_step, gnorm, learning_rate,
+               train_op, inputs]
 
     total_loss, prev_step = 0., -1
 
@@ -360,6 +362,8 @@ def train(n_token, ps_device):
       fetched = sess.run(fetches, feed_dict=feed_dict)
 
       loss_np, tower_mems_np, curr_step = fetched[:3]
+      input = fetched[6]
+      print(input)
       total_loss += loss_np
 
       if curr_step > 0 and curr_step % FLAGS.iterations == 0:
@@ -479,14 +483,9 @@ def evaluate(n_token, ps_device):
 
 
 class Tfxl(object):
-  def __init__(self, n_token, eval_ckpt_path, config):
+  def __init__(self, n_token, eval_ckpt_path, config, bos_idx=-1):
+    # configurations
     self.n_token = n_token
-
-    # Building graph
-    self.inputs = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
-    self.labels = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
-    self.tower_new_mems, self.tower_output = [], []
-
     self.mem_len = config["mem_len"]
     self.d_model = config["d_model"]
     self.n_layer = config["n_layer"]
@@ -499,61 +498,94 @@ class Tfxl(object):
     self.same_length = config["same_length"]
     self.clamp_len = config["clamp_len"]
     self.untie_r = config["untie_r"]
+    self.bos_idx = bos_idx
 
-    with tf.device('/gpu:0'), \
-         tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(),
-                                     reuse=tf.compat.v1.AUTO_REUSE):
-      self.mems = [tf.compat.v1.placeholder(tf.float32, [self.mem_len, 1,
-                                                         self.d_model])
-                   for _ in range(self.n_layer)]
+    tf.compat.v1.logging.info("self.n_token {}".format(self.n_token))
+    tf.compat.v1.logging.info("self.n_layer {}".format(self.n_layer))
+    tf.compat.v1.logging.info("self.d_model {}".format(self.d_model))
+    tf.compat.v1.logging.info("self.d_embed {}".format(self.d_embed))
+    tf.compat.v1.logging.info("self.n_head {}".format(self.n_head))
+    tf.compat.v1.logging.info("self.d_head {}".format(self.d_head))
+    tf.compat.v1.logging.info("self.d_inner {}".format(self.d_inner))
+    tf.compat.v1.logging.info("self.dropout {}".format(self.dropout))
+    tf.compat.v1.logging.info("self.dropatt {}".format(self.dropatt))
+    tf.compat.v1.logging.info("self.same_length {}".format(self.same_length))
+    tf.compat.v1.logging.info("self.clamp_len {}".format(self.clamp_len))
+    tf.compat.v1.logging.info("self.untie_r {}".format(self.untie_r))
+    tf.compat.v1.logging.info("self.bos_idx {}".format(self.bos_idx))
 
-      # batch major to time major?
-      inp = tf.transpose(self.inputs, [1, 0])
-      tgt = tf.transpose(self.labels, [1, 0])
+    # Building a new graph
+    self._graph = tf.Graph()
+    with self._graph.as_default():
+      self.inputs = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
+      self.labels = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
+      self.tower_new_mems, self.tower_output = [], []
 
-      _, new_mems_i, output_i = \
-        model.transformer(dec_inp=inp,
-                          target=tgt,
-                          mems=self.mems,
-                          n_token=self.n_token,
-                          n_layer=self.n_layer,
-                          d_model=self.d_model,  # dimension of hidden
-                          d_embed=self.d_embed,  # dimension of embedded
-                          n_head=self.n_head,
-                          d_head=self.d_head,  # dimension of head
-                          d_inner=self.d_inner,  # dim of inner ??
-                          dropout=self.dropout,  # dropout rate
-                          dropatt=self.dropatt,  # dropout attention ??
-                          initializer=None,
-                          proj_initializer=None,
-                          is_training=False,
-                          mem_len=self.mem_len,  # how many segments
-                          same_length=self.same_length,  # ??
-                          clamp_len=self.clamp_len,  # clamp length..?
-                          untie_r=self.untie_r,  # untie ??
-                          )
+      with tf.device('/gpu:0'), \
+           tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(),
+                                       reuse=tf.compat.v1.AUTO_REUSE):
+        self.mems = [tf.compat.v1.placeholder(tf.float32, [self.mem_len, 1,
+                                                           self.d_model])
+                     for _ in range(self.n_layer)]
 
-      # number of parameters
-      num_params = \
-        sum([np.prod(v.shape) for v in tf.compat.v1.trainable_variables()])
-      tf.compat.v1.logging.info('#params: {}'.format(num_params))
+        # batch major to time major?
+        inp = tf.transpose(self.inputs, [1, 0])
+        tgt = tf.transpose(self.labels, [1, 0])
 
-      self.tower_new_mems.append(new_mems_i)
-      self.tower_output.append(output_i)
+        _, new_mems_i, output_i = \
+          model.transformer(dec_inp=inp,
+                            target=tgt,
+                            mems=self.mems,
+                            n_token=self.n_token,
+                            n_layer=self.n_layer,
+                            d_model=self.d_model,  # dimension of hidden
+                            d_embed=self.d_embed,  # dimension of embedded
+                            n_head=self.n_head,
+                            d_head=self.d_head,  # dimension of head
+                            d_inner=self.d_inner,  # dim of inner ??
+                            dropout=self.dropout,  # dropout rate
+                            dropatt=self.dropatt,  # dropout attention ??
+                            initializer=None,
+                            proj_initializer=None,
+                            is_training=False,
+                            mem_len=self.mem_len,  # how many segments
+                            same_length=self.same_length,  # ??
+                            clamp_len=self.clamp_len,  # clamp length..?
+                            untie_r=self.untie_r,  # untie ??
+                            )
 
-    # Starting Session
-    self.sess = tf.compat.v1.Session(config= \
-                           tf.compat.v1.ConfigProto(
-                             allow_soft_placement=True))
-    self.sess.run(tf.compat.v1.global_variables_initializer())
+        # number of parameters
+        num_params = \
+          sum([np.prod(v.shape) for v in tf.compat.v1.trainable_variables()])
+        tf.compat.v1.logging.info('#params: {}'.format(num_params))
 
-    # Loading a Checkpoints
-    saver = tf.compat.v1.train.Saver()
-    tf.compat.v1.logging.info("Evaluate {}".format(eval_ckpt_path))
-    saver.restore(self.sess, eval_ckpt_path)
+        self.tower_new_mems.append(new_mems_i)
+        self.tower_output.append(output_i)
+
+      # Starting Session
+      self.sess = tf.compat.v1.Session(config= \
+                             tf.compat.v1.ConfigProto(
+                               allow_soft_placement=True))
+      self.sess.run(tf.compat.v1.global_variables_initializer())
+
+      # Loading a Checkpoints
+      saver = tf.compat.v1.train.Saver()
+      tf.compat.v1.logging.info("Evaluate {}".format(eval_ckpt_path))
+      saver.restore(self.sess, eval_ckpt_path)
 
   def get_dist(self, sent, softmax=False, temperature=1.0):
+    if self.bos_idx >= 0:
+      assert(isinstance(sent, (np.ndarray, list)))
+      if isinstance(sent, np.ndarray):
+        sent = copy.deepcopy(sent.tolist())
+      elif isinstance(sent, list):
+        sent = copy.deepcopy(sent)
+      sent.insert(0, self.bos_idx)
+    else:
+      sent = sent
+
     fetches = [self.tower_new_mems, self.tower_output]
+    sent = [sent]
     feed_dict = {self.inputs: [sent[0]], self.labels: [sent[0]]}
 
     tower_mems_np = [np.zeros([self.mem_len, 1, self.d_model],
@@ -567,6 +599,7 @@ class Tfxl(object):
     tower_mems_np, output = fetched[:3]
 
     logit = output[0][-1][0]
+    logit = logit[:-1] # removing last dim: bos
     if softmax:
       return np.exp(logit/temperature) / np.sum(np.exp(logit/temperature))
     return logit
@@ -604,11 +637,14 @@ def main(unused_argv):
               "same_length": FLAGS.same_length,
               "clamp_len": FLAGS.clamp_len,
               "untie_r": FLAGS.untie_r}
+
+    bos_idx = vocab.get_idx("<s>") if vocab.get_idx("<s>") is not \
+                                      vocab.get_idx("<unk>") else -1
     tfxl = Tfxl(n_token=len(vocab), eval_ckpt_path=eval_ckpt_path,
-                config=config)
-    sent = vocab.encode_sentence("<s> no one", add_eos=False,
+                config=config, bos_idx=bos_idx)
+    sent = vocab.encode_sentence("no one is f c", add_eos=False,
                                  add_beos=False)
-    output = tfxl.get_dist(sent, softmax=True, temperature=1.0)
+    output = tfxl.get_dist(sent[0], softmax=True, temperature=1.0)
     print(vocab.get_sym(np.argmax(output)))
   else:
     with open(FLAGS.corpus_info_path, "r") as fp:
