@@ -19,14 +19,13 @@
 
 import tensorflow as tf # pylint: disable=import-error
 
-def positional_embedding(pos_seq, inv_freq, bsz=None):
+def positional_embedding(pos_seq, inv_freq):
   # outer product between post_seq and inv_freq
   sinusoid_inp = tf.einsum('i,j->ij', pos_seq, inv_freq)
   pos_emb = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], -1)
-  if bsz is not None:
-    return tf.tile(pos_emb[:, None, :], [1, bsz, 1])
 
   return pos_emb[:, None, :]
+
 
 def positionwise_FF(inp, d_model, d_inner, dropout, kernel_initializer,
                     scope='ff', is_training=True):

@@ -137,8 +137,9 @@ FLAGS = flags.FLAGS
 
 def assign_to_gpu(gpu=0, ps_dev="/device:CPU:0"):
   def _assign(operation):
-    node_def = operation if isinstance(operation,
-                                       tf.compat.v1.NodeDef) else operation.node_def
+    node_def = \
+      operation if isinstance(operation, tf.compat.v1.NodeDef) else \
+        operation.node_def
     if node_def.op == "Variable":
       return ps_dev
     return "/gpu:%d" % gpu
@@ -166,7 +167,8 @@ def average_grads_and_vars(tower_grads_and_vars):
       values += [grad_and_val_idx.values]
     indices = tf.concat(indices, 0)
     values = tf.concat(values, 0) / len(grad_and_vars_avg_sparse)
-    return tf.IndexedSlices(values, indices, grad_and_vars_avg_sparse[0][0].dense_shape)
+    return tf.IndexedSlices(values, indices,
+                            grad_and_vars_avg_sparse[0][0].dense_shape)
 
   avg_grads_and_vars = []
   for grad_and_vars in zip(*tower_grads_and_vars):
@@ -613,8 +615,7 @@ def main(unused_argv):
     You need a vocabulary file corresponding to the model.
     """
     from tfxl.vocabulary import Vocab
-    vocab = Vocab(min_freq=0, max_size=None, lower_case=True,
-                      delimiter=None,
+    vocab = Vocab(min_freq=0, max_size=None, lower_case=True, delimiter=None,
                   vocab_file=FLAGS.vocab)
     vocab.build_vocab()
 
