@@ -206,7 +206,7 @@ def single_core_graph(inp, tgt, mems, is_training, n_token):
     proj_initializer =\
       tf.initializers.random_normal(stddev=FLAGS.proj_init_std, seed=None)
 
-  loss, new_mems, output =\
+  loss, new_mems, output, att_prob =\
     model.transformer(dec_inp=inp, # [1:-1], why not zero?
                       target=tgt,  # [2:]
                       mems=mems, # 3.2 Segment-Level Recurrent with State
@@ -240,7 +240,7 @@ def single_core_graph(inp, tgt, mems, is_training, n_token):
     grads_and_vars = list(zip(grads, all_vars))
     return loss, new_mems, grads_and_vars
 
-  return loss, new_mems, output
+  return loss, new_mems, output, att_prob
 
 
 def train(n_token, ps_device):
@@ -420,7 +420,7 @@ def evaluate(n_token, ps_device):
                                [FLAGS.mem_len, per_core_bsz, FLAGS.d_model])
                 for _ in range(FLAGS.n_layer)]
 
-      loss_i, new_mems_i, _ = \
+      loss_i, new_mems_i, _, _ = \
         single_core_graph(inp=inputs[i],
                           tgt=labels[i],
                           mems=mems_i,
@@ -483,7 +483,7 @@ def evaluate(n_token, ps_device):
         avg_loss, math.exp(avg_loss), avg_loss / math.log(2)))
 
 
-class Tfxl(object):
+class Tfxl(object): # pylint: disable=too-many-instance-attributes, too-few-public-methods
   def __init__(self, n_token, eval_ckpt_path, config, bos_idx=-1):
     # configurations
     self.n_token = n_token
@@ -521,6 +521,7 @@ class Tfxl(object):
       self.inputs = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
       self.labels = tf.compat.v1.placeholder(dtype=tf.int32, shape=(1, None))
       self.tower_new_mems, self.tower_output = [], []
+      self.tower_att_prob, self.tower_att_vec = [], []
 
       with tf.device('/gpu:0'), \
            tf.compat.v1.variable_scope(tf.compat.v1.get_variable_scope(),
@@ -533,7 +534,7 @@ class Tfxl(object):
         inp = tf.transpose(self.inputs, [1, 0])
         tgt = tf.transpose(self.labels, [1, 0])
 
-        _, new_mems_i, output_i = \
+        _, new_mems_i, output_i, att_prob_i = \
           model.transformer(dec_inp=inp,
                             target=tgt,
                             mems=self.mems,
@@ -553,20 +554,21 @@ class Tfxl(object):
                             same_length=self.same_length,  # ??
                             clamp_len=self.clamp_len,  # clamp length..?
                             untie_r=self.untie_r,  # untie ??
-                            )
+                           )
 
         # number of parameters
-        num_params = \
+        num_params =\
           sum([np.prod(v.shape) for v in tf.compat.v1.trainable_variables()])
         tf.compat.v1.logging.info('#params: {}'.format(num_params))
 
         self.tower_new_mems.append(new_mems_i)
         self.tower_output.append(output_i)
+        self.tower_att_prob.append(att_prob_i)
 
       # Starting Session
-      self.sess = tf.compat.v1.Session(config= \
-                             tf.compat.v1.ConfigProto(
-                               allow_soft_placement=True))
+      self.sess =\
+        tf.compat.v1.Session(config=\
+          tf.compat.v1.ConfigProto(allow_soft_placement=True))
       self.sess.run(tf.compat.v1.global_variables_initializer())
 
       # Loading a Checkpoints
@@ -576,7 +578,7 @@ class Tfxl(object):
 
   def get_dist(self, sent, softmax=False, temperature=1.0):
     if self.bos_idx >= 0:
-      assert(isinstance(sent, (np.ndarray, list)))
+      assert isinstance(sent, (np.ndarray, list))
       if isinstance(sent, np.ndarray):
         sent = copy.deepcopy(sent.tolist())
       elif isinstance(sent, list):
@@ -585,7 +587,7 @@ class Tfxl(object):
     else:
       sent = sent
 
-    fetches = [self.tower_new_mems, self.tower_output]
+    fetches = [self.tower_new_mems, self.tower_output, self.tower_att_prob]
     sent = [sent]
     feed_dict = {self.inputs: [sent[0]], self.labels: [sent[0]]}
 
@@ -595,25 +597,24 @@ class Tfxl(object):
     for tower_mem_idx, m_np in zip(self.mems, tower_mems_np):
       feed_dict[tower_mem_idx] = m_np
 
-    fetched = self.sess.run(fetches, feed_dict=feed_dict)
+    tower_mems_np, output, att_prob = self.sess.run(fetches, feed_dict=feed_dict)
 
-    tower_mems_np, output = fetched[:3]
+    # prob to heatmap
+    q_len = np.shape(np.squeeze(att_prob))[0]
+    att_maps = np.squeeze(att_prob)[:, -q_len:, :]
+    att_maps = np.swapaxes(att_maps, 0, 2)
 
     logit = output[0][-1][0]
     logit = logit[:-1] # removing last dim: bos
     if softmax:
-      return np.exp(logit/temperature) / np.sum(np.exp(logit/temperature))
-    return logit
+      logit = np.exp(logit/temperature) / np.sum(np.exp(logit/temperature))
+    return logit, att_maps
 
 def main(unused_argv):
   del unused_argv
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
   if FLAGS.do_decode:
-    """
-    an example source code snippet for sampling
-    You need a vocabulary file corresponding to the model.
-    """
     from tfxl.vocabulary import Vocab
     vocab = Vocab(min_freq=0, max_size=None, lower_case=True, delimiter=None,
                   vocab_file=FLAGS.vocab)
@@ -640,12 +641,24 @@ def main(unused_argv):
 
     bos_idx = vocab.get_idx("<s>") if vocab.get_idx("<s>") is not \
                                       vocab.get_idx("<unk>") else -1
+
     tfxl = Tfxl(n_token=len(vocab), eval_ckpt_path=eval_ckpt_path,
                 config=config, bos_idx=bos_idx)
-    sent = vocab.encode_sentence("no one is f c", add_eos=False,
+
+    sent = vocab.encode_sentence("a form of asbestos once used to make kent "
+                                 "cigarette filters has caused a",
+                                 add_eos=False,
                                  add_beos=False)
-    output = tfxl.get_dist(sent[0], softmax=True, temperature=1.0)
+
+    output, att_maps = tfxl.get_dist(sent[0], softmax=True, temperature=1.0)
     print(vocab.get_sym(np.argmax(output)))
+
+    import matplotlib.pyplot as plt
+    for img_i, vec in enumerate(att_maps):
+      plt.imshow(np.transpose(vec), cmap='hot', interpolation='nearest')
+      img_path = "%s_%0d.png"%(eval_ckpt_path, img_i + 1)
+      plt.savefig(img_path)
+      print("heat map for header %d was saved to %s"%(img_i + 1, img_path))
   else:
     with open(FLAGS.corpus_info_path, "r") as fp:
       import json

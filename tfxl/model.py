@@ -67,6 +67,7 @@ def rel_multihead_attn(arg_w, arg_r, r_w_bias, r_r_bias, attn_mask, mems, d_mode
     qlen = tf.shape(arg_w)[0]
     bsz = tf.shape(arg_w)[1]
 
+    # previous!
     cat = tf.concat([mems, arg_w], 0) if mems is not None and \
                                          mems.shape.ndims > 1 else arg_w
     w_heads = tf.layers.dense(cat, 3 * n_head * d_head, use_bias=False,
@@ -93,7 +94,7 @@ def rel_multihead_attn(arg_w, arg_r, r_w_bias, r_r_bias, attn_mask, mems, d_mode
     # 1. MatMul of Q and K
     AC = tf.einsum('ibnd,jbnd->ijbn', rw_head_q, w_head_k) #pylint: disable=invalid-name
     BD = tf.einsum('ibnd,jnd->ijbn', rr_head_q, r_head_k) #pylint: disable=invalid-name
-    # because of relative position?????, R_{i-j}
+    # relative position position
     BD = rel_shift(BD) #pylint: disable=invalid-name
 
     # 2. Scale: Scaled A_{i,j}^rel
@@ -117,7 +118,7 @@ def rel_multihead_attn(arg_w, arg_r, r_w_bias, r_r_bias, attn_mask, mems, d_mode
 
     # Add & Norm
     output = tf.contrib.layers.layer_norm(attn_out + arg_w, begin_norm_axis=-1)
-  return output
+  return output, attn_prob
 
 
 def scaled_embedding_lookup(token_idx, n_token, d_embed, d_proj,
@@ -285,7 +286,7 @@ def transformer(dec_inp, target, mems, n_token, n_layer, d_model, d_embed,
       new_mems.append(_cache_mem(output, mems[layer_idx], mem_len))
 
       with tf.compat.v1.variable_scope('layer_{}'.format(layer_idx)):
-        output =\
+        output, att_prob =\
           rel_multihead_attn(arg_w=output,
                              arg_r=pos_emb,
                              r_w_bias=\
@@ -315,4 +316,4 @@ def transformer(dec_inp, target, mems, n_token, n_layer, d_model, d_embed,
     loss, output = logsoftmax(hidden=output, target=target, n_token=n_token,
                               params=shared_params)
 
-    return loss, new_mems, output
+    return loss, new_mems, output, att_prob
