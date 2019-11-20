@@ -600,8 +600,10 @@ class Tfxl(object): # pylint: disable=too-many-instance-attributes, too-few-publ
     tower_mems_np, output, att_prob = self.sess.run(fetches, feed_dict=feed_dict)
 
     # prob to heatmap
-    q_len = np.shape(np.squeeze(att_prob))[0]
-    att_maps = np.squeeze(att_prob)[:, -q_len:, :]
+    att_prob = np.array(att_prob)
+    q_len = att_prob.shape[1]
+    att_prob = np.squeeze(att_prob, axis=3)
+    att_maps = np.squeeze(att_prob, axis=0)[:, -q_len:, :]
     att_maps = np.swapaxes(att_maps, 0, 2)
 
     logit = output[0][-1][0]
